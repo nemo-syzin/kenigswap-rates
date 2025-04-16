@@ -6,6 +6,7 @@ import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import subprocess
+import asyncio
 
 # ----------------------------------------------------
 # Установка Chromium для Playwright
@@ -51,9 +52,10 @@ async def fetch_grinex_rate():
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(user_agent="Mozilla/5.0")
             page = await context.new_page()
-            await page.goto("https://grinex.io/trading/usdta7a5", timeout=30000)
-            await page.wait_for_selector("tbody.asks tr", timeout=10000)
-            await page.wait_for_selector("tbody.bids tr", timeout=10000)
+            await page.goto("https://grinex.io/trading/usdta7a5", timeout=60000)
+            await asyncio.sleep(3)  # Подождать, пока страница прогрузится
+            await page.wait_for_selector("tbody.asks tr", timeout=30000)
+            await page.wait_for_selector("tbody.bids tr", timeout=30000)
             ask_row = await page.query_selector("tbody.asks tr")
             ask_price = float(await ask_row.get_attribute("data-price"))
             bid_row = await page.query_selector("tbody.bids tr")
@@ -212,7 +214,7 @@ async def send_rates_message(application):
 # ----------------------------------------------------
 
 def main():
-    install_chromium_for_playwright()  # Установка Chromium
+    install_chromium_for_playwright()
 
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -224,8 +226,8 @@ def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_rates_message,
-        'cron',
-        second=0,
+        'interval',
+        minutes=2, seconds=30,
         timezone=KALININGRAD_TZ,
         args=[application]
     )
