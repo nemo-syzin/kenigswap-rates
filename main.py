@@ -12,6 +12,10 @@ import asyncio
 # Установка Chromium для Playwright
 # ----------------------------------------------------
 def install_chromium_for_playwright():
+    """
+    Функция для установки Chromium для Playwright. 
+    Запускает команду установки Playwright Chromium в системе.
+    """
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
         print("✅ Chromium установлен для Playwright.")
@@ -30,29 +34,33 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------
 # Константы
 # ----------------------------------------------------
-TOKEN = '7128150617:AAHxECcATIDtakWEAy5gp4j2PH-AF80mTAQ'
-CHAT_ID = '@KaliningradCryptoKenigSwap'
-KALININGRAD_TZ = timezone(timedelta(hours=2))
-PASSWORD = "ШУЛЛЕР777"
+TOKEN = '7128150617:AAHxECcATIDtakWEAy5gp4j2PH-AF80mTAQ'  # Токен для бота Telegram
+CHAT_ID = '@KaliningradCryptoKenigSwap'  # Канал для отправки сообщений
+KALININGRAD_TZ = timezone(timedelta(hours=2))  # Часовой пояс Калининграда
+PASSWORD = "ШУЛЛЕР777"  # Пароль для авторизации
 
 # ----------------------------------------------------
 # Переменные корректировки и авторизации
 # ----------------------------------------------------
-KENIG_ASK_OFFSET = 1.0
-KENIG_BID_OFFSET = -0.5
-AUTHORIZED_USERS = set()
+KENIG_ASK_OFFSET = 1.0  # Корректировка для цены продажи
+KENIG_BID_OFFSET = -0.5  # Корректировка для цены покупки
+AUTHORIZED_USERS = set()  # Сет авторизованных пользователей
 
 # ----------------------------------------------------
 # Настройки повторных попыток
 # ----------------------------------------------------
-MAX_RETRIES = 3  # Максимальное количество попыток
+MAX_RETRIES = 3  # Максимальное количество попыток для получения данных
 RETRY_DELAY = 5  # Задержка между попытками в секундах
 
 # ----------------------------------------------------
-# ФУНКЦИИ ПОЛУЧЕНИЯ КУРСОВ
+# Функции для получения курсов валют
 # ----------------------------------------------------
 
 async def fetch_grinex_rate():
+    """
+    Получает курс с сайта Grinex для валюты USDT/RUB.
+    Возвращает курсы покупки и продажи.
+    """
     retries = 0
     while retries < MAX_RETRIES:
         try:
@@ -80,6 +88,10 @@ async def fetch_grinex_rate():
                 return None, None  # Возвращаем None, если все попытки не удались
 
 async def fetch_bestchange_sell():
+    """
+    Получает курс продажи с сайта BestChange.
+    Возвращает курс продажи в рублях.
+    """
     retries = 0
     while retries < MAX_RETRIES:
         try:
@@ -102,6 +114,10 @@ async def fetch_bestchange_sell():
     return None
 
 async def fetch_bestchange_buy():
+    """
+    Получает курс покупки с сайта BestChange.
+    Возвращает курс покупки в рублях.
+    """
     retries = 0
     while retries < MAX_RETRIES:
         try:
@@ -127,6 +143,10 @@ async def fetch_bestchange_buy():
     return None
 
 async def fetch_energotransbank_rate():
+    """
+    Получает курс с сайта EnergoTransBank.
+    Возвращает курс продажи, покупки и курса ЦБ.
+    """
     retries = 0
     while retries < MAX_RETRIES:
         try:
@@ -155,6 +175,10 @@ async def fetch_energotransbank_rate():
 # ----------------------------------------------------
 
 def is_authorized(user_id):
+    """
+    Проверка авторизации пользователя.
+    Возвращает True, если пользователь авторизован, иначе False.
+    """
     return user_id in AUTHORIZED_USERS
 
 # ----------------------------------------------------
@@ -162,26 +186,38 @@ def is_authorized(user_id):
 # ----------------------------------------------------
 
 async def auth(update, context):
+    """
+    Команда для авторизации пользователя.
+    Требует ввода пароля.
+    """
     user_id = update.effective_user.id
     if len(context.args) != 1:
         await update.message.reply_text("Введите пароль. Пример: /auth ШУЛЛЕР")
         return
     if context.args[0] == PASSWORD:
         AUTHORIZED_USERS.add(user_id)
-        await update.message.reply_text("✅ Доступ разрешён.")
+        await update.message.reply_text("Доступ разрешён.")
     else:
-        await update.message.reply_text("❌ Неверный пароль.")
+        await update.message.reply_text("Неверный пароль.")
 
 async def check(update, context):
+    """
+    Команда для отправки курсов валют в канал.
+    Требует авторизации.
+    """
     if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("⛔ Введите пароль через /auth <пароль>")
+        await update.message.reply_text("Введите пароль через /auth <пароль>")
         return
     await send_rates_message(context.application)
     await update.message.reply_text("Курсы отправлены в канал.")
 
 async def change_offsets(update, context):
+    """
+    Команда для изменения корректировок курса.
+    Требует авторизации.
+    """
     if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("⛔ Введите пароль через /auth <пароль>")
+        await update.message.reply_text("Введите пароль через /auth <пароль>")
         return
     try:
         global KENIG_ASK_OFFSET, KENIG_BID_OFFSET
@@ -189,24 +225,49 @@ async def change_offsets(update, context):
             raise ValueError("Пример: /change 1.2 -0.4")
         KENIG_ASK_OFFSET = float(context.args[0])
         KENIG_BID_OFFSET = float(context.args[1])
-        await update.message.reply_text(f"✅ Обновлено:\nAsk offset: +{KENIG_ASK_OFFSET}\nBid offset: {KENIG_BID_OFFSET}")
+        await update.message.reply_text(f"Обновлено:\nAsk offset: +{KENIG_ASK_OFFSET}\nBid offset: {KENIG_BID_OFFSET}")
     except Exception as e:
-        await update.message.reply_text(f"⚠ Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def show_offsets(update, context):
+    """
+    Команда для отображения текущих корректировок курса.
+    Требует авторизации.
+    """
     if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("⛔ Введите пароль через /auth <пароль>")
+        await update.message.reply_text("Введите пароль через /auth <пароль>")
         return
-    await update.message.reply_text(f"📊 Текущие корректировки:\nAsk offset: +{KENIG_ASK_OFFSET}\nBid offset: {KENIG_BID_OFFSET}")
+    await update.message.reply_text(f"Текущие корректировки:\nAsk offset: +{KENIG_ASK_OFFSET}\nBid offset: {KENIG_BID_OFFSET}")
 
 async def start(update, context):
+    """
+    Стартовая команда для активации бота.
+    """
     await update.message.reply_text("Бот активен. Используй /auth <пароль> для доступа к командам.")
+
+async def help_command(update, context):
+    """
+    Команда для вывода списка всех доступных команд.
+    """
+    help_text = (
+        "Доступные команды:\n\n"
+        "/start - Активирует бота\n"
+        "/auth <пароль> - Авторизация\n"
+        "/check - Отправка курсов валют в канал\n"
+        "/change <ask_offset> <bid_offset> - Изменение корректировок курсов\n"
+        "/show_offsets - Отображение текущих корректировок\n"
+        "/help - Выводит список всех команд"
+    )
+    await update.message.reply_text(help_text)
 
 # ----------------------------------------------------
 # ОТПРАВКА СООБЩЕНИЯ
 # ----------------------------------------------------
 
 async def send_rates_message(application):
+    """
+    Функция для получения курсов с различных источников и отправки сообщений в канал.
+    """
     bestchange_sell = await fetch_bestchange_sell()
     bestchange_buy = await fetch_bestchange_buy()
     energo_ask, energo_bid, energo_cbr = await fetch_energotransbank_rate()
@@ -251,6 +312,9 @@ async def send_rates_message(application):
 # ----------------------------------------------------
 
 def main():
+    """
+    Основная функция, которая запускает бота.
+    """
     install_chromium_for_playwright()
 
     application = ApplicationBuilder().token(TOKEN).build()
@@ -259,6 +323,7 @@ def main():
     application.add_handler(CommandHandler("check", check))
     application.add_handler(CommandHandler("change", change_offsets))
     application.add_handler(CommandHandler("show_offsets", show_offsets))
+    application.add_handler(CommandHandler("help", help_command))
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
