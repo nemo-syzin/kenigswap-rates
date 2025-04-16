@@ -43,75 +43,112 @@ KENIG_BID_OFFSET = -0.5
 AUTHORIZED_USERS = set()
 
 # ----------------------------------------------------
+# Настройки повторных попыток
+# ----------------------------------------------------
+MAX_RETRIES = 3  # Максимальное количество попыток
+RETRY_DELAY = 5  # Задержка между попытками в секундах
+
+# ----------------------------------------------------
 # ФУНКЦИИ ПОЛУЧЕНИЯ КУРСОВ
 # ----------------------------------------------------
 
 async def fetch_grinex_rate():
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent="Mozilla/5.0")
-            page = await context.new_page()
-            await page.goto("https://grinex.io/trading/usdta7a5", timeout=60000)
-            await asyncio.sleep(3)  # Подождать, пока страница прогрузится
-            await page.wait_for_selector("tbody.asks tr", timeout=30000)
-            await page.wait_for_selector("tbody.bids tr", timeout=30000)
-            ask_row = await page.query_selector("tbody.asks tr")
-            ask_price = float(await ask_row.get_attribute("data-price"))
-            bid_row = await page.query_selector("tbody.bids tr")
-            bid_price = float(await bid_row.get_attribute("data-price"))
-            await browser.close()
-            return ask_price, bid_price
-    except Exception as e:
-        logger.error(f"Grinex error: {str(e)}")
-        return None, None
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent="Mozilla/5.0")
+                page = await context.new_page()
+                await page.goto("https://grinex.io/trading/usdta7a5", timeout=60000)
+                await asyncio.sleep(3)  # Подождать, пока страница прогрузится
+                await page.wait_for_selector("tbody.asks tr", timeout=30000)
+                await page.wait_for_selector("tbody.bids tr", timeout=30000)
+                ask_row = await page.query_selector("tbody.asks tr")
+                ask_price = float(await ask_row.get_attribute("data-price"))
+                bid_row = await page.query_selector("tbody.bids tr")
+                bid_price = float(await bid_row.get_attribute("data-price"))
+                await browser.close()
+                return ask_price, bid_price
+        except Exception as e:
+            retries += 1
+            logger.error(f"Grinex error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)  # Ожидаем перед повторной попыткой
+            else:
+                logger.error("Максимальное количество попыток достигнуто. Не удалось получить данные с Grinex.")
+                return None, None  # Возвращаем None, если все попытки не удались
 
 async def fetch_bestchange_sell():
-    url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            div = soup.find('div', class_='fs')
-            if div:
-                rate = ''.join(c for c in div.text if c.isdigit() or c in [',', '.']).replace(',', '.')
-                return float(rate)
-    except Exception as e:
-        logger.error(f"BestChange sell error: {str(e)}")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url)
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                div = soup.find('div', class_='fs')
+                if div:
+                    rate = ''.join(c for c in div.text if c.isdigit() or c in [',', '.']).replace(',', '.')
+                    return float(rate)
+        except Exception as e:
+            retries += 1
+            logger.error(f"BestChange sell error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)  # Ожидаем перед повторной попыткой
+            else:
+                logger.error("Максимальное количество попыток достигнуто. Не удалось получить данные с BestChange.")
+                return None
     return None
 
 async def fetch_bestchange_buy():
-    url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
-    try:
-        async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
-            resp = await client.get(url)
-            soup = BeautifulSoup(resp.text, "html.parser")
-            table = soup.find("table", id="content_table")
-            row = table.find("tr", onclick=True)
-            cells = row.find_all("td", class_="bi")
-            target = next((td for td in cells if "RUB Cash" in td.text), None)
-            if target:
-                digits = ''.join(c for c in target.text if c.isdigit() or c in [',', '.']).replace(',', '.')
-                return float(digits)
-    except Exception as e:
-        logger.error(f"BestChange buy error: {str(e)}")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
+            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
+                resp = await client.get(url)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                table = soup.find("table", id="content_table")
+                row = table.find("tr", onclick=True)
+                cells = row.find_all("td", class_="bi")
+                target = next((td for td in cells if "RUB Cash" in td.text), None)
+                if target:
+                    digits = ''.join(c for c in target.text if c.isdigit() or c in [',', '.']).replace(',', '.')
+                    return float(digits)
+        except Exception as e:
+            retries += 1
+            logger.error(f"BestChange buy error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)  # Ожидаем перед повторной попыткой
+            else:
+                logger.error("Максимальное количество попыток достигнуто. Не удалось получить данные с BestChange.")
+                return None
     return None
 
 async def fetch_energotransbank_rate():
-    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    try:
-        async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
-            resp = await client.get(url)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            table = soup.find('table', class_='table-best white_bg')
-            usd_cell = table.find('td', class_='title')
-            purchase = usd_cell.find_next('td')
-            sale = purchase.find_next('td')
-            cbr = sale.find_next('td')
-            return float(sale.text.replace(',', '.')), float(purchase.text.replace(',', '.')), float(cbr.text.replace(',', '.'))
-    except Exception as e:
-        logger.error(f"EnergoTransBank error: {str(e)}")
-        return None, None, None
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
+            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
+                resp = await client.get(url)
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                table = soup.find('table', class_='table-best white_bg')
+                usd_cell = table.find('td', class_='title')
+                purchase = usd_cell.find_next('td')
+                sale = purchase.find_next('td')
+                cbr = sale.find_next('td')
+                return float(sale.text.replace(',', '.')), float(purchase.text.replace(',', '.')), float(cbr.text.replace(',', '.'))
+        except Exception as e:
+            retries += 1
+            logger.error(f"EnergoTransBank error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)  # Ожидаем перед повторной попыткой
+            else:
+                logger.error("Максимальное количество попыток достигнуто. Не удалось получить данные с EnergoTransBank.")
+                return None, None, None
+    return None, None, None
 
 # ----------------------------------------------------
 # УТИЛИТЫ ДОСТУПА
