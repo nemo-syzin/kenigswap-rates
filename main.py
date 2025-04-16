@@ -18,9 +18,9 @@ def install_chromium_for_playwright():
     """
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
-        print("✅ Chromium установлен для Playwright.")
+        print("Chromium установлен для Playwright.")
     except Exception as e:
-        print(f"❌ Не удалось установить Chromium: {e}")
+        print(f"Не удалось установить Chromium: {e}")
 
 # ----------------------------------------------------
 # Логгирование
