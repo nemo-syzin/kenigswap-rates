@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------
 # Константы
 # ----------------------------------------------------
-TOKEN = '7128150617:AAHxECcATIDtakWEAy5gp4j2PH-AF80mTAQ'  # Токен для бота Telegram
+TOKEN = '7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk'  # Токен для бота Telegram
 CHAT_ID = '@KaliningradCryptoKenigSwap'  # Канал для отправки сообщений
 KALININGRAD_TZ = timezone(timedelta(hours=2))  # Часовой пояс Калининграда
-PASSWORD = "ШУЛЛЕР777"  # Пароль для авторизации
+PASSWORD = "7128150617"  # Пароль для авторизации
 
 # ----------------------------------------------------
 # Переменные корректировки и авторизации
