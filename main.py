@@ -64,16 +64,21 @@ async def fetch_grinex_rate():
                 browser = await playwright.chromium.launch(headless=True)
                 context = await browser.new_context(user_agent="Mozilla/5.0")
                 page = await context.new_page()
-                await page.goto("https://grinex.io/trading/usdta7a5", timeout=60000)
 
-                # Клик по cookie (если есть)
+                await page.goto(
+                    "https://grinex.io/trading/usdta7a5",
+                    timeout=90000,
+                    wait_until='networkidle'
+                )
+
+                # Закрываем уведомление о cookies, если есть
                 try:
                     await page.click("text='Accept cookies'", timeout=5000)
                 except:
                     pass
 
-                await page.wait_for_selector("table.asks tr[data-price]", timeout=30000)
-                await page.wait_for_selector("table.bids tr[data-price]", timeout=30000)
+                await page.wait_for_selector("table.asks tr[data-price]", timeout=60000)
+                await page.wait_for_selector("table.bids tr[data-price]", timeout=60000)
 
                 ask_row = await page.query_selector("table.asks tr[data-price]")
                 ask_price = float(await ask_row.get_attribute("data-price"))
@@ -82,6 +87,7 @@ async def fetch_grinex_rate():
 
                 await browser.close()
                 return ask_price, bid_price
+
         except Exception as e:
             retries += 1
             logger.error(f"Grinex error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
