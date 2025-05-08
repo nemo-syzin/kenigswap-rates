@@ -57,40 +57,39 @@ RETRY_DELAY = 5  # Задержка между попытками в секун�
 # ----------------------------------------------------
 
 async def fetch_grinex_rate():
-    # Запуск браузера и открытие страницы торгов пары A7A5/USDT
-    browser = await playwright.chromium.launch(headless=True)
-    page = await browser.new_page()
-    await page.goto("https://grinex.io/trading/usdta7a5")
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent="Mozilla/5.0")
+                page = await context.new_page()
+                await page.goto("https://grinex.io/trading/usdta7a5", timeout=60000)
 
-    # Принятие cookie, если появится соответствующий баннер
-    try:
-        await page.click("text=\"Accept cookies\"", timeout=5000)
-    except Exception:
-        pass  # Баннер мог не появиться или уже закрыт
+                # Клик по cookie (если есть)
+                try:
+                    await page.click("text='Accept cookies'", timeout=5000)
+                except:
+                    pass
 
-    # Ожидание загрузки хотя бы одной заявки в ордербуке (ask side)
-    await page.wait_for_selector("table.asks tr[data-price]", state="attached", timeout=10000)
+                await page.wait_for_selector("table.asks tr[data-price]", timeout=30000)
+                await page.wait_for_selector("table.bids tr[data-price]", timeout=30000)
 
-    # Получение первого ордера ASK и BID из соответствующих таблиц
-    ask_row = await page.query_selector("table.asks tr[data-price]")
-    bid_row = await page.query_selector("table.bids tr[data-price]")
+                ask_row = await page.query_selector("table.asks tr[data-price]")
+                ask_price = float(await ask_row.get_attribute("data-price"))
+                bid_row = await page.query_selector("table.bids tr[data-price]")
+                bid_price = float(await bid_row.get_attribute("data-price"))
 
-    # Альтернатива: если данные находятся в списках <ul>, используем эти селекторы
-    if not ask_row:
-        ask_row = await page.query_selector("ul.asks li[data-price]")
-    if not bid_row:
-        bid_row = await page.query_selector("ul.bids li[data-price]")
-
-    # Извлечение цен ASK и BID из атрибутов data-price
-    ask_price = await ask_row.get_attribute("data-price")
-    bid_price = await bid_row.get_attribute("data-price")
-
-    # Преобразование в числовой формат (float) при необходимости
-    ask_price = float(ask_price) if ask_price is not None else None
-    bid_price = float(bid_price) if bid_price is not None else None
-
-    await browser.close()
-    return ask_price, bid_price
+                await browser.close()
+                return ask_price, bid_price
+        except Exception as e:
+            retries += 1
+            logger.error(f"Grinex error (attempt {retries}/{MAX_RETRIES}): {str(e)}")
+            if retries < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                logger.error("Максимальное количество попыток достигнуто. Не удалось получить данные с Grinex.")
+                return None, None
 
 async def fetch_bestchange_sell():
     """
