@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright
 from telegram.ext import ApplicationBuilder, CommandHandler
 
 # ───────────────────── КОНФИГ ───────────────────────
-TOKEN  = "YOUR_TELEGRAM_TOKEN"
+TOKEN  = "7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk"
 CHAT_ID = "@KaliningradCryptoKenigSwap"
 PASSWORD = "7128150617"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
