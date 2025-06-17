@@ -21,6 +21,7 @@ TOKEN          = "7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk"   # токен
 CHAT_ID        = "@KaliningradCryptoKenigSwap"                      # канал/чат
 PASSWORD       = "7128150617"                                       # пароль /auth
 KALININGRAD_TZ = timezone(timedelta(hours=2))
+MAKE_WEBHOOK_URL = "https://hook.eu2.make.com/h65jqut10mmctpx1hfa8xegib9ylzh3c"
 
 KENIG_ASK_OFFSET = 1.0   # +к продаже
 KENIG_BID_OFFSET = -0.5  # +к покупке
@@ -150,6 +151,17 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None, None, None
+    
+
+ async def push_rates_to_make(sell: float, buy: float) -> None:
+
+     try:
+         async with httpx.AsyncClient(timeout=10) as client:
+             await client.post(MAKE_WEBHOOK_URL, json={"sell": round(sell, 2),
+                                                      "buy":  round(buy,  2)})
+             logger.info("Rates sent to Make.")
+    except Exception as e:
+         logger.warning("Make push failed: %s", e)
 
 # ──────────────────── ТЕЛЕГРАМ‑КОМАНДЫ ───────────────────
 def is_authorized(user_id: int) -> bool:
@@ -243,7 +255,13 @@ async def send_rates_message(app):
         )
     except Exception as e:
         logger.error("Send error: %s", e)
+        
 
+     if gr_ask and gr_bid:                    # данные с Grinex получены
+         kenig_sell = gr_ask + KENIG_ASK_OFFSET
+         kenig_buy  = gr_bid + KENIG_BID_OFFSET
+         await push_rates_to_make(kenig_sell, kenig_buy)
+         
 # ─────────────────────────  MAIN  ────────────────────────
 def main() -> None:
     install_chromium_for_playwright()
