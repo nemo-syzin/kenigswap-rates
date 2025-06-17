@@ -152,8 +152,7 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
                 await asyncio.sleep(RETRY_DELAY)
     return None, None, None
     
-
- async def push_rates_to_make(sell: float, buy: float) -> None:
+async def push_rates_to_make(sell: float, buy: float) -> None:
 
      try:
          async with httpx.AsyncClient(timeout=10) as client:
@@ -245,7 +244,7 @@ async def send_rates_message(app):
         lines.append("Нет данных с EnergoTransBank.")
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
-
+   
     try:
         await app.bot.send_message(
             chat_id=CHAT_ID,
@@ -255,8 +254,12 @@ async def send_rates_message(app):
         )
     except Exception as e:
         logger.error("Send error: %s", e)
-        
 
+    # ─── PUSH В MAKE ───
+    if gr_ask and gr_bid:
+        kenig_sell = gr_ask + KENIG_ASK_OFFSET
+        kenig_buy  = gr_bid + KENIG_BID_OFFSET
+        await push_rates_to_make(kenig_sell, kenig_buy)
      if gr_ask and gr_bid:                    # данные с Grinex получены
          kenig_sell = gr_ask + KENIG_ASK_OFFSET
          kenig_buy  = gr_bid + KENIG_BID_OFFSET
