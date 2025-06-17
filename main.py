@@ -153,14 +153,14 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
     return None, None, None
     
 async def push_rates_to_make(sell: float, buy: float) -> None:
-
-     try:
-         async with httpx.AsyncClient(timeout=10) as client:
-             await client.post(MAKE_WEBHOOK_URL, json={"sell": round(sell, 2),
-                                                      "buy":  round(buy,  2)})
-             logger.info("Rates sent to Make.")
+    """Отправляет JSON в Make-webhook."""
+    payload = {"sell": round(sell, 2), "buy": round(buy, 2)}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(MAKE_WEBHOOK_URL, json=payload)
+            logger.info("Rates sent to Make.")
     except Exception as e:
-         logger.warning("Make push failed: %s", e)
+        logger.warning("Make push failed: %s", e)
 
 # ──────────────────── ТЕЛЕГРАМ‑КОМАНДЫ ───────────────────
 def is_authorized(user_id: int) -> bool:
