@@ -133,7 +133,7 @@ async def push_rates_to_make(sell: float, buy: float) -> None:
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             await c.post(MAKE_WEBHOOK_URL, json=payload)
-            logger.info("Rates sent to Make.")
+             logger.info("Push → Make [%s] %s", r.status_code, r.text[:200])
     except Exception as e:
         logger.warning("Make push failed: %s", e)
 
