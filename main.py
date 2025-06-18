@@ -1,4 +1,5 @@
-# ───────────────────── IMPORTS ──────────────────────
+
+# ─────────── IMPORTS ───────────
 import asyncio, logging, subprocess, html
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -9,7 +10,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from telegram.ext import ApplicationBuilder, CommandHandler
 
-# ───────────────────── КОНФИГ ───────────────────────
+# ─────────── CONFIG ────────────
 TOKEN  = "7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk"
 CHAT_ID = "@KaliningradCryptoKenigSwap"
 PASSWORD = "7128150617"
@@ -23,7 +24,7 @@ KENIG_BID_OFFSET = -0.5  # +к покупке
 MAX_RETRIES, RETRY_DELAY = 3, 5
 AUTHORIZED_USERS: set[int] = set()
 
-# ───────────────────── ЛОГГЕР ───────────────────────
+# ─────────── LOGGER ────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -31,14 +32,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ────────────────── PLAYWRIGHT SETUP ─────────────────
+# ───────── PLAYWRIGHT SETUP ─────
 def install_chromium_for_playwright() -> None:
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
     except Exception as exc:
         logger.warning("Playwright install error: %s", exc)
 
-# ───────────────────── SOURCES ───────────────────────
+# ───────── PUSH TO MAKE ─────────
+async def push_rates_to_make(source: str, sell: float, buy: float) -> None:
+    """Отправить JSON {source,sell,buy} в Make-Webhook."""
+    payload = {
+        "source": source,
+        "sell":   round(sell, 2),
+        "buy":    round(buy, 2),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(MAKE_WEBHOOK_URL, json=payload)
+            logger.info("Push → Make [%s] %s", r.status_code, r.text[:120])
+            r.raise_for_status()
+    except Exception as e:
+        logger.warning("Make push failed (%s): %s", source, e)
+
+# ─────────── SCRAPERS ───────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 30_000
 
@@ -47,13 +64,15 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True,
-                    args=["--disable-blink-features=AutomationControlled"])
-                context = await browser.new_context(user_agent=
-                    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                     "Chrome/123.0.0.0 Safari/537.36"))
+                        args=["--disable-blink-features=AutomationControlled"])
+                context = await browser.new_context(user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"))
                 page = await context.new_page()
-                await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                await page.goto(GRINEX_URL, wait_until="domcontentloaded",
+                                timeout=TIMEOUT_MS)
+                # cookie banner
                 try:
                     await page.locator("button:text('Accept')").click(timeout=3_000)
                 except Exception:
@@ -67,7 +86,7 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 await browser.close()
                 return ask, bid
         except Exception as e:
-            logger.warning("Grinex attempt %s/%s failed: %s", attempt, MAX_RETRIES, e)
+            logger.warning("Grinex attempt %s/%s: %s", attempt, MAX_RETRIES, e)
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None, None
@@ -81,7 +100,8 @@ async def fetch_bestchange_sell() -> Optional[float]:
                 soup = BeautifulSoup(res.text, "html.parser")
                 div = soup.find("div", class_="fs")
                 if div:
-                    return float("".join(ch for ch in div.text if ch.isdigit() or ch in ",.").replace(",", "."))
+                    return float("".join(ch for ch in div.text if ch.isdigit() or ch in ",.")
+                                   .replace(",", "."))
         except Exception as e:
             logger.warning("BestChange sell attempt %s/%s: %s", a, MAX_RETRIES, e)
             if a < MAX_RETRIES:
@@ -96,10 +116,12 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 res = await c.get(url, timeout=15)
                 soup = BeautifulSoup(res.text, "html.parser")
                 table = soup.find("table", id="content_table")
-                row = table.find("tr", onclick=True)
-                price_td = next((td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text), None)
+                row   = table.find("tr", onclick=True)
+                price_td = next((td for td in row.find_all("td", class_="bi")
+                                 if "RUB Cash" in td.text), None)
                 if price_td:
-                    return float("".join(ch for ch in price_td.text if ch.isdigit() or ch in ",.").replace(",", "."))
+                    return float("".join(ch for ch in price_td.text if ch.isdigit() or ch in ",.")
+                                   .replace(",", "."))
         except Exception as e:
             logger.warning("BestChange buy attempt %s/%s: %s", a, MAX_RETRIES, e)
             if a < MAX_RETRIES:
@@ -113,7 +135,7 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
             async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as c:
                 res = await c.get(url, timeout=15)
                 soup = BeautifulSoup(res.text, "html.parser")
-                table = soup.find("table", class_="table-best white_bg")
+                table  = soup.find("table", class_="table-best white_bg")
                 usd_td = table.find("td", class_="title")
                 buy_td = usd_td.find_next("td")
                 sell_td = buy_td.find_next("td")
@@ -127,25 +149,7 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
                 await asyncio.sleep(RETRY_DELAY)
     return None, None, None
 
-#─────────────── PUSH В MAKE ───────────────
-
-tasks = []
-if gr_ask and gr_bid:
-    tasks.append(push_rates_to_make(
-        "kenig",
-        gr_ask + KENIG_ASK_OFFSET,
-        gr_bid + KENIG_BID_OFFSET
-    ))
-
-if bc_sell and bc_buy:
-    tasks.append(push_rates_to_make("bestchange", bc_sell, bc_buy))
-
-if en_sell and en_buy:
-    tasks.append(push_rates_to_make("energo", en_sell, en_buy))
-
-await asyncio.gather(*tasks)
-
-# ───────────────── TELEGRAМ-КОМАНДЫ ──────────────────
+# ─────── TELEGRAM COMMANDS ───────
 def is_authorized(uid: int) -> bool:
     return uid in AUTHORIZED_USERS
 
@@ -189,7 +193,7 @@ async def show_offsets(update, context):
         return
     await update.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}")
 
-# ─────────────── ОТПРАВКА СООБЩЕНИЯ ───────────────
+# ───────── SEND RATES MSG ─────────
 async def send_rates_message(app):
     bc_sell = await fetch_bestchange_sell()
     bc_buy  = await fetch_bestchange_buy()
@@ -222,7 +226,7 @@ async def send_rates_message(app):
         lines.append(f"Продажа: {en_sell:.2f} ₽, "
                      f"Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽")
     else:
-        lines.append("Нет данных с EnerгоTransBank.")
+        lines.append("Нет данных с EnergoTransBank.")
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
 
@@ -237,14 +241,20 @@ async def send_rates_message(app):
     except Exception as e:
         logger.error("Send error: %s", e)
 
-    # Make
+    # Make – шлём три источника
+    tasks = []
     if gr_ask and gr_bid:
-        await push_rates_to_make(
-            gr_ask + KENIG_ASK_OFFSET,
-            gr_bid + KENIG_BID_OFFSET
-        )
+        tasks.append(push_rates_to_make("kenig",
+            gr_ask + KENIG_ASK_OFFSET, gr_bid + KENIG_BID_OFFSET))
+    if bc_sell and bc_buy:
+        tasks.append(push_rates_to_make("bestchange", bc_sell, bc_buy))
+    if en_sell and en_buy:
+        tasks.append(push_rates_to_make("energo", en_sell, en_buy))
 
-# ───────────────────────── MAIN ────────────────────────
+    if tasks:
+        await asyncio.gather(*tasks)
+
+# ─────────────── MAIN ──────────────
 def main() -> None:
     install_chromium_for_playwright()
 
@@ -267,7 +277,7 @@ def main() -> None:
     scheduler.start()
 
     logger.info("Bot started.")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
