@@ -129,15 +129,21 @@ async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float]
 
 #─────────────── PUSH В MAKE ───────────────
 
-async def push_rates_to_make(source: str, sell: float, buy: float) -> None:
-    payload = {"source": source, "sell": round(sell, 2), "buy": round(buy, 2)}
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(MAKE_WEBHOOK_URL, json=payload)
-            logger.info("Push → Make [%s] %s", r.status_code, r.text[:120])
-            r.raise_for_status()
-    except Exception as e:
-        logger.warning("Make push failed (%s): %s", source, e)
+tasks = []
+if gr_ask and gr_bid:
+    tasks.append(push_rates_to_make(
+        "kenig",
+        gr_ask + KENIG_ASK_OFFSET,
+        gr_bid + KENIG_BID_OFFSET
+    ))
+
+if bc_sell and bc_buy:
+    tasks.append(push_rates_to_make("bestchange", bc_sell, bc_buy))
+
+if en_sell and en_buy:
+    tasks.append(push_rates_to_make("energo", en_sell, en_buy))
+
+await asyncio.gather(*tasks)
 
 # ───────────────── TELEGRAМ-КОМАНДЫ ──────────────────
 def is_authorized(uid: int) -> bool:
