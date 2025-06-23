@@ -1,6 +1,5 @@
-
 # ─────────── IMPORTS ───────────
-import asyncio, logging, subprocess, html
+import asyncio, logging, subprocess, html, os
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 
@@ -9,17 +8,21 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from telegram.ext import ApplicationBuilder, CommandHandler
+from supabase import create_client, Client
 
 # ─────────── CONFIG ────────────
-TOKEN  = "7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk"
+TOKEN  = os.getenv("7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk") 
 CHAT_ID = "@KaliningradCryptoKenigSwap"
-PASSWORD = "7128150617"
+PASSWORD = os.getenv("TG_BOT_PASS", "7128150617")
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
-MAKE_WEBHOOK_URL = "https://hook.eu2.make.com/h65jqut10mmctpx1hfa8xegib9ylzh3c"
+# Supabase
+SUPABASE_URL = os.environ["https://jetfadpysjsvtqdgnsjp.supabase.co"]
+SUPABASE_KEY = os.environ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpldGZhZHB5c2pzdnRxZGduc2pwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAxNjY1OTEsImV4cCI6MjA2NTc0MjU5MX0.WNUax6bkFNW8NMWKxpRQ9SIFE_M2BaTxcNt2eevQT34"]
+SB: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-KENIG_ASK_OFFSET = 1.0   # +к продаже
-KENIG_BID_OFFSET = -0.5  # +к покупке
+KENIG_ASK_OFFSET = 1.0
+KENIG_BID_OFFSET = -0.5
 
 MAX_RETRIES, RETRY_DELAY = 3, 5
 AUTHORIZED_USERS: set[int] = set()
@@ -39,21 +42,20 @@ def install_chromium_for_playwright() -> None:
     except Exception as exc:
         logger.warning("Playwright install error: %s", exc)
 
-# ───────── PUSH TO MAKE ─────────
-async def push_rates_to_make(source: str, sell: float, buy: float) -> None:
-    """Отправить JSON {source,sell,buy} в Make-Webhook."""
+# ─────────── Supabase writer ───────────
+async def upsert_rate(source: str, sell: float, buy: float) -> None:
+    """⟶ kenig_rates (upsert по source)"""
     payload = {
         "source": source,
         "sell":   round(sell, 2),
         "buy":    round(buy, 2),
+        "updated_at": datetime.utcnow().isoformat()
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(MAKE_WEBHOOK_URL, json=payload)
-            logger.info("Push → Make [%s] %s", r.status_code, r.text[:120])
-            r.raise_for_status()
+        await SB.table("kenig_rates").upsert(payload, on_conflict="source").execute()
+        logger.info("Supabase upsert OK: %s", source)
     except Exception as e:
-        logger.warning("Make push failed (%s): %s", source, e)
+        logger.warning("Supabase upsert failed (%s): %s", source, e)
 
 # ─────────── SCRAPERS ───────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
@@ -72,7 +74,6 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 page = await context.new_page()
                 await page.goto(GRINEX_URL, wait_until="domcontentloaded",
                                 timeout=TIMEOUT_MS)
-                # cookie banner
                 try:
                     await page.locator("button:text('Accept')").click(timeout=3_000)
                 except Exception:
@@ -128,7 +129,7 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
-async def fetch_energotransbank_rate() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
     for a in range(1, MAX_RETRIES + 1):
         try:
@@ -197,7 +198,7 @@ async def show_offsets(update, context):
 async def send_rates_message(app):
     bc_sell = await fetch_bestchange_sell()
     bc_buy  = await fetch_bestchange_buy()
-    en_sell, en_buy, en_cbr = await fetch_energotransbank_rate()
+    en_sell, en_buy, en_cbr = await fetch_energo()
     gr_ask, gr_bid          = await fetch_grinex_rate()
 
     ts = datetime.now(KALININGRAD_TZ).strftime("%d.%m.%Y %H:%M:%S")
@@ -241,15 +242,15 @@ async def send_rates_message(app):
     except Exception as e:
         logger.error("Send error: %s", e)
 
-    # Make – шлём три источника
+    # Supabase upsert (параллельно)
     tasks = []
     if gr_ask and gr_bid:
-        tasks.append(push_rates_to_make("kenig",
+        tasks.append(upsert_rate("kenig",
             gr_ask + KENIG_ASK_OFFSET, gr_bid + KENIG_BID_OFFSET))
     if bc_sell and bc_buy:
-        tasks.append(push_rates_to_make("bestchange", bc_sell, bc_buy))
+        tasks.append(upsert_rate("bestchange", bc_sell, bc_buy))
     if en_sell and en_buy:
-        tasks.append(push_rates_to_make("energo", en_sell, en_buy))
+        tasks.append(upsert_rate("energo", en_sell, en_buy))
 
     if tasks:
         await asyncio.gather(*tasks)
