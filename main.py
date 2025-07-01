@@ -13,18 +13,15 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from supabase import Client, create_client
 from telegram.ext import ApplicationBuilder, CommandHandler
+from dotenv import load_dotenv
+load_dotenv() 
 
 # ───────────────────── CONFIG ───────────────────────
-# ▸ задайте переменные окружения в Render → Environment
-TOKEN = os.getenv("TG_BOT_TOKEN", "7128150617:AAHEMrzGrSOZrLAMYDf8F8MwklSvPDN2IVk")
-PASSWORD = os.getenv("TG_BOT_PASS", "7128150617")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://jetfadpysjsvtqdgnsjp.supabase.co")
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpldGZhZHB5c2pzdnRxZGduc2pwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAxNjY1OTEsImV4cCI6MjA2NTc0MjU5MX0."
-    "WNUax6bkFNW8NMWKxpRQ9SIFE_M2BaTxcNt2eevQT34",
-)
+
+TOKEN = os.getenv("TG_BOT_TOKEN")
+PASSWORD = os.getenv("TG_BOT_PASS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 CHAT_ID = "@KaliningradCryptoKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
@@ -58,7 +55,6 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
         "updated_at": datetime.utcnow().isoformat(),
     }
     try:
-        # клиент синхронный → запускаем в пуле потоков, чтобы не блокировать event-loop
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
@@ -99,7 +95,6 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 )
                 page = await context.new_page()
                 await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                # закрыть cookie-баннер
                 try:
                     await page.locator("button:text('Accept')").click(timeout=3000)
                 except Exception:
@@ -290,7 +285,7 @@ async def send_rates_message(app):
     except Exception as e:
         logger.error("Send error: %s", e)
 
-    # Supabase (параллельно)
+    # Supabase
     tasks = []
     if gr_ask and gr_bid:
         tasks.append(
