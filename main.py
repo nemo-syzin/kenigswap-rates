@@ -16,6 +16,65 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from dotenv import load_dotenv
 load_dotenv() 
 
+
+# ───────── FULL-MATRIX HELPERS ────────
+CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
+           "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
+ASSETS  = CRYPTOS + ["USDT", "RUB"]
+BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
+
+async def _fetch_bybit_basics() -> dict[str, float]:
+    prices = {"USDT": 1.0}
+    async with httpx.AsyncClient() as cli:
+        for sym in BYBIT_SYMBOLS:
+            try:
+                j = (await cli.get(
+                    f"https://api.bybit.com/v5/market/tickers"
+                    f"?category=spot&symbol={sym}", timeout=10
+                )).json()
+                prices[sym[:-4]] = float(j["result"]["list"][0]["lastPrice"])
+            except Exception as e:
+                logger.warning("Bybit error %s: %s", sym, e)
+            await asyncio.sleep(0.15)
+    return prices
+
+async def _get_usdt_rub() -> float:
+    return (await fetch_bestchange_sell()) or 80.0   # Fallback
+
+async def _build_full_rows() -> list[dict]:
+    base = await _fetch_bybit_basics()
+    base["RUB"] = 1 / await _get_usdt_rub()          # RUB→USDT
+    now = datetime.utcnow().isoformat()
+    rows = []
+    for b in ASSETS:
+        for q in ASSETS:
+            if b == q: continue
+            if b == "USDT":
+                price = 1 / base[q]
+            elif q == "USDT":
+                price = base[b]
+            else:
+                price = base[b] / base[q]
+            rows.append({
+                "source": "derived",
+                "base":   b,
+                "quote":  q,
+                "last_price": round(price, 8),
+                "updated_at": now,
+            })
+    return rows
+
+async def upsert_full_matrix():
+    rows = await _build_full_rows()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: sb.table("kenig_rates")
+                  .upsert(rows, on_conflict="source,base,quote")
+                  .execute()
+    )
+    logger.info("Full matrix upserted: %s rows", len(rows))
+
 # ───────────────────── CONFIG ───────────────────────
 
 TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -323,6 +382,13 @@ def main() -> None:
         timezone=KALININGRAD_TZ,
         args=[app],
     )
+      scheduler.add_job(
+        upsert_full_matrix,
+        trigger="interval",
+        minutes=1,
+        timezone=KALININGRAD_TZ,
+    )
+
     scheduler.start()
 
     logger.info("Bot started.")
