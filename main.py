@@ -373,7 +373,7 @@ def main() -> None:
     app.add_handler(CommandHandler("change", change_offsets))
     app.add_handler(CommandHandler("show_offsets", show_offsets))
 
-       scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler()
 
     # — отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
