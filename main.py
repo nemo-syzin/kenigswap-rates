@@ -373,16 +373,20 @@ def main() -> None:
     app.add_handler(CommandHandler("change", change_offsets))
     app.add_handler(CommandHandler("show_offsets", show_offsets))
 
-    scheduler = AsyncIOScheduler()
+       scheduler = AsyncIOScheduler()
+
+    # — отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
         send_rates_message,
-        "interval",
+        trigger="interval",
         minutes=2,
         seconds=30,
         timezone=KALININGRAD_TZ,
         args=[app],
     )
-      scheduler.add_job(
+
+    # — генерация полной матрицы курсов каждую минуту
+    scheduler.add_job(
         upsert_full_matrix,
         trigger="interval",
         minutes=1,
