@@ -25,40 +25,48 @@ BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
 async def _fetch_bybit_basics() -> dict[str, float]:
     prices = {"USDT": 1.0}
-    async with httpx.AsyncClient() as cli:
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0"}
+    ) as cli:
         for sym in BYBIT_SYMBOLS:
             try:
-                j = (await cli.get(
-                    f"https://api.bybit.com/v5/market/tickers"
-                    f"?category=spot&symbol={sym}", timeout=10
-                )).json()
+                r = await cli.get(
+                    f"https://api.bybit.com/v5/market/tickers",
+                    params={"category": "spot", "symbol": sym},
+                    timeout=10,
+                )
+                if r.status_code != 200:
+                    logger.warning("Bybit %s -> HTTP %s", sym, r.status_code)
+                    continue
+                j = r.json()
                 prices[sym[:-4]] = float(j["result"]["list"][0]["lastPrice"])
             except Exception as e:
                 logger.warning("Bybit error %s: %s", sym, e)
-            await asyncio.sleep(0.15)
-    return prices
+            await asyncio.sleep(0.1)
+    return prices  
 
 async def _get_usdt_rub() -> float:
     return (await fetch_bestchange_sell()) or 80.0   # Fallback
 
-async def _build_full_rows() -> list[dict]:
+async def _build_full_rows():
     base = await _fetch_bybit_basics()
-    base["RUB"] = 1 / await _get_usdt_rub()          # RUB→USDT
+    base["RUB"] = 1 / await _get_usdt_rub()
     now = datetime.utcnow().isoformat()
     rows = []
+
     for b in ASSETS:
         for q in ASSETS:
-            if b == q: continue
-            if b == "USDT":
-                price = 1 / base[q]
-            elif q == "USDT":
-                price = base[b]
-            else:
-                price = base[b] / base[q]
+            if b == q or b not in base or q not in base:
+                continue  
+            price = (
+                1 / base[q] if b == "USDT"
+                else base[b] if q == "USDT"
+                else base[b] / base[q]
+            )
             rows.append({
                 "source": "derived",
-                "base":   b,
-                "quote":  q,
+                "base": b,
+                "quote": q,
                 "last_price": round(price, 8),
                 "updated_at": now,
             })
