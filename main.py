@@ -21,35 +21,30 @@ load_dotenv()
 CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
            "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
-BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
+BINANCE_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
-async def _fetch_bybit_basics() -> dict[str, float]:
+async def _fetch_binance_basics() -> dict[str, float]:
+    """
+    Возвращает словарь {COIN: price_in_usdt} с Binance (без ключа, без гео-блоков).
+    """
     prices = {"USDT": 1.0}
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0"}
-    ) as cli:
-        for sym in BYBIT_SYMBOLS:
-            try:
-                r = await cli.get(
-                    f"https://api.bybit.com/v5/market/tickers",
-                    params={"category": "spot", "symbol": sym},
-                    timeout=10,
-                )
-                if r.status_code != 200:
-                    logger.warning("Bybit %s -> HTTP %s", sym, r.status_code)
-                    continue
-                j = r.json()
-                prices[sym[:-4]] = float(j["result"]["list"][0]["lastPrice"])
-            except Exception as e:
-                logger.warning("Bybit error %s: %s", sym, e)
-            await asyncio.sleep(0.1)
-    return prices  
+    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as cli:
+        r = await cli.get("https://api.binance.com/api/v3/ticker/price", timeout=10)
+        if r.status_code != 200:
+            logger.warning("Binance ticker HTTP %s", r.status_code)
+            return prices
+        for obj in r.json():                     # {'symbol': 'BTCUSDT', 'price': '66700.12'}
+            sym = obj["symbol"]
+            if sym in BINANCE_SYMBOLS:           # интересуют только 20 пар к USDT
+                prices[sym[:-4]] = float(obj["price"])
+    logger.info("Binance prices fetched: %s / 20", len(prices) - 1)
+    return prices
 
 async def _get_usdt_rub() -> float:
     return (await fetch_bestchange_sell()) or 80.0   # Fallback
 
 async def _build_full_rows():
-    base = await _fetch_bybit_basics()
+     base = await _fetch_binance_basics()
     base["RUB"] = 1 / await _get_usdt_rub()
     now = datetime.utcnow().isoformat()
     rows = []
