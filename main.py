@@ -25,18 +25,28 @@ BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
 
 async def _fetch_bybit_basics() -> dict[str, float]:
-    prices = {"USDT": 1.0}
-    url = "https://api.bytick.com/v5/market/tickers" 
-    params = {"category": "spot"}
 
-    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=10) as cli:
+    prices = {"USDT": 1.0}
+    url     = "https://api.bybit.com/v5/market/tickers"
+    params  = {"category": "spot"}            # получаем сразу ВСЕ spot-пары
+    proxy   = os.getenv("BYBIT_PROXY")        # None → без прокси
+
+    async with httpx.AsyncClient(
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept":     "application/json",
+            "Referer":    "https://www.bybit.com/",
+        },
+        proxies=proxy,       # ← ключевая строка
+        timeout=10,
+        follow_redirects=True,
+    ) as cli:
         r = await cli.get(url, params=params)
         if r.status_code != 200:
             logger.warning("Bybit ticker HTTP %s", r.status_code)
             return prices
 
-        data = r.json().get("result", {}).get("list", [])
-        for item in data:                              # [{'symbol':'BTCUSDT', 'lastPrice':'...'}, …]
+        for item in r.json().get("result", {}).get("list", []):
             sym = item["symbol"]
             if sym in BYBIT_SYMBOLS:
                 prices[sym[:-4]] = float(item["lastPrice"])
