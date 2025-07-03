@@ -21,34 +21,34 @@ load_dotenv()
 CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
            "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
-BINANCE_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
+BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]    
 
 
-async def _fetch_binance_basics() -> dict[str, float]:
+async def _fetch_bybit_basics() -> dict[str, float]:
     prices = {"USDT": 1.0}
-    url = "https://data.binance.com/api/v3/ticker/price"
-    params = {"symbols": str(BINANCE_SYMBOLS).replace("'", '"')}
+    url = "https://api.bybit.com/v5/market/tickers"
+    params = {"category": "spot"}
 
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0"},
-        follow_redirects=True,          # ← ключевая строка
-    ) as cli:
-        r = await cli.get(url, params=params, timeout=10)
+    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=10) as cli:
+        r = await cli.get(url, params=params)
         if r.status_code != 200:
-            logger.warning("Binance ticker HTTP %s", r.status_code)
+            logger.warning("Bybit ticker HTTP %s", r.status_code)
             return prices
 
-        for obj in r.json():            # {'symbol':'BTCUSDT','price':'66700.12'}
-            prices[obj["symbol"][:-4]] = float(obj["price"])
+        data = r.json().get("result", {}).get("list", [])
+        for item in data:                              # [{'symbol':'BTCUSDT', 'lastPrice':'...'}, …]
+            sym = item["symbol"]
+            if sym in BYBIT_SYMBOLS:
+                prices[sym[:-4]] = float(item["lastPrice"])
 
-    logger.info("Binance prices fetched: %s / 20", len(prices) - 1)
+    logger.info("Bybit prices fetched: %s / 20", len(prices) - 1)
     return prices
 
 async def _get_usdt_rub() -> float:
     return (await fetch_bestchange_sell()) or 80.0   # Fallback
 
 async def _build_full_rows() -> list[dict]:
-    base = await _fetch_binance_basics()            # цены COIN→USDT
+    base = await _fetch_bybit_basics()           # цены COIN→USDT
     base["RUB"] = 1 / await _get_usdt_rub()         # RUB→USDT
     now = datetime.utcnow().isoformat()
     rows = []
