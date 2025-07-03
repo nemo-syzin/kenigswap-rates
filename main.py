@@ -52,6 +52,7 @@ async def _fetch_bybit_basics() -> dict[str, float]:
                 prices[sym[:-4]] = float(item["lastPrice"])
 
     logger.info("Bybit prices fetched: %s / 20", len(prices) - 1)
+           
     return prices
 
 async def _get_usdt_rub() -> float:
@@ -93,6 +94,31 @@ async def upsert_full_matrix():
                   .execute()
     )
     logger.info("Full matrix upserted: %s rows", len(rows))
+
+async def refresh_full_matrix() -> None:
+    """
+    Каждую минуту:
+    1) удаляем ВСЕ старые строки source='derived';
+    2) вставляем новую полную матрицу (462 строк).
+    """
+    rows = await _build_full_rows()
+    loop = asyncio.get_running_loop()
+
+    await loop.run_in_executor(
+        None,
+        lambda: (
+            sb.table("kenig_rates")
+              .delete()
+              .eq("source", "derived")
+              .execute()
+        ),
+    )
+
+    await loop.run_in_executor(
+        None,
+        lambda: sb.table("kenig_rates").insert(rows).execute(),
+    )
+    logger.info("Full matrix refreshed: %s rows", len(rows))           
 
 # ───────────────────── CONFIG ───────────────────────
 
@@ -412,7 +438,7 @@ def main() -> None:
 
     # — генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
-        upsert_full_matrix,
+        refresh_full_matrix,
         trigger="interval",
         minutes=1,
         timezone=KALININGRAD_TZ,
