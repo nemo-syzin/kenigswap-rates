@@ -27,15 +27,21 @@ BINANCE_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 async def _fetch_binance_basics() -> dict[str, float]:
     prices = {"USDT": 1.0}
     url = "https://data.binance.com/api/v3/ticker/price"
-    params = {"symbols": str(BINANCE_SYMBOLS).replace("'", '"')}  # ["BTCUSDT",…]
-    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as cli:
+    params = {"symbols": str(BINANCE_SYMBOLS).replace("'", '"')}
+
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0"},
+        follow_redirects=True,          # ← ключевая строка
+    ) as cli:
         r = await cli.get(url, params=params, timeout=10)
         if r.status_code != 200:
             logger.warning("Binance ticker HTTP %s", r.status_code)
             return prices
-        for obj in r.json():
+
+        for obj in r.json():            # {'symbol':'BTCUSDT','price':'66700.12'}
             prices[obj["symbol"][:-4]] = float(obj["price"])
-    logger.info("Binance prices fetched: %s / 20", len(prices)-1)
+
+    logger.info("Binance prices fetched: %s / 20", len(prices) - 1)
     return prices
 
 async def _get_usdt_rub() -> float:
@@ -109,18 +115,24 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
-    """Пишем/обновляем запись в таблице kenig_rates (по полю source)."""
+    """Записываем скрапер-курс (строка без base/quote)."""
     payload = {
         "source": source,
         "sell": round(sell, 2),
-        "buy": round(buy, 2),
+        "buy":  round(buy, 2),
+        "base": None,          # ← важно
+        "quote": None,         # ← важно
         "updated_at": datetime.utcnow().isoformat(),
     }
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
-            lambda: sb.table("kenig_rates").upsert(payload, on_conflict="source").execute(),
+            lambda: (
+                sb.table("kenig_rates")
+                  .upsert(payload, on_conflict="source,base,quote")  # ← изменили
+                  .execute()
+            ),
         )
         logger.info("Supabase upsert OK: %s", source)
     except Exception as e:
