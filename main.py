@@ -26,7 +26,7 @@ BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
 async def _fetch_bybit_basics() -> dict[str, float]:
     prices = {"USDT": 1.0}
-    url = "https://api.bybit.com/v5/market/tickers"
+    url = "https://api.bytick.com/v5/market/tickers" 
     params = {"category": "spot"}
 
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=10) as cli:
