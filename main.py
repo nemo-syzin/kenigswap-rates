@@ -43,21 +43,22 @@ async def _fetch_binance_basics() -> dict[str, float]:
 async def _get_usdt_rub() -> float:
     return (await fetch_bestchange_sell()) or 80.0   # Fallback
 
-async def _build_full_rows():
-     base = await _fetch_binance_basics()
-    base["RUB"] = 1 / await _get_usdt_rub()
+async def _build_full_rows() -> list[dict]:
+    base = await _fetch_binance_basics()            # цены COIN→USDT
+    base["RUB"] = 1 / await _get_usdt_rub()         # RUB→USDT
     now = datetime.utcnow().isoformat()
     rows = []
 
     for b in ASSETS:
         for q in ASSETS:
             if b == q or b not in base or q not in base:
-                continue  
-            price = (
-                1 / base[q] if b == "USDT"
-                else base[b] if q == "USDT"
-                else base[b] / base[q]
-            )
+                continue
+            if b == "USDT":
+                price = 1 / base[q]                 # USDT→COIN/RUB
+            elif q == "USDT":
+                price = base[b]                     # COIN/RUB→USDT
+            else:
+                price = base[b] / base[q]           # COIN↔COIN/RUB
             rows.append({
                 "source": "derived",
                 "base": b,
@@ -66,6 +67,7 @@ async def _build_full_rows():
                 "updated_at": now,
             })
     return rows
+
 
 async def upsert_full_matrix():
     rows = await _build_full_rows()
