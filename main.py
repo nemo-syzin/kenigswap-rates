@@ -23,21 +23,19 @@ CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
 BINANCE_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
+
 async def _fetch_binance_basics() -> dict[str, float]:
-    """
-    Возвращает словарь {COIN: price_in_usdt} с Binance (без ключа, без гео-блоков).
-    """
     prices = {"USDT": 1.0}
+    url = "https://data.binance.com/api/v3/ticker/price"
+    params = {"symbols": str(BINANCE_SYMBOLS).replace("'", '"')}  # ["BTCUSDT",…]
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as cli:
-        r = await cli.get("https://api.binance.com/api/v3/ticker/price", timeout=10)
+        r = await cli.get(url, params=params, timeout=10)
         if r.status_code != 200:
             logger.warning("Binance ticker HTTP %s", r.status_code)
             return prices
-        for obj in r.json():                     # {'symbol': 'BTCUSDT', 'price': '66700.12'}
-            sym = obj["symbol"]
-            if sym in BINANCE_SYMBOLS:           # интересуют только 20 пар к USDT
-                prices[sym[:-4]] = float(obj["price"])
-    logger.info("Binance prices fetched: %s / 20", len(prices) - 1)
+        for obj in r.json():
+            prices[obj["symbol"][:-4]] = float(obj["price"])
+    logger.info("Binance prices fetched: %s / 20", len(prices)-1)
     return prices
 
 async def _get_usdt_rub() -> float:
