@@ -66,28 +66,41 @@ async def _get_usdt_rub() -> float:
     return (await fetch_bestchange_sell()) or 80.0  
 
 async def _build_full_rows() -> list[dict]:
-    base = await _fetch_bybit_basics()        
-    base["RUB"] = 1 / await _get_usdt_rub() 
-    now = datetime.utcnow().isoformat()
-    rows = []
+   
+    base: dict[str, float] = await _fetch_bybit_basics()       # COIN → USDT
+    base["RUB"] = 1 / await _get_usdt_rub()                    #  RUB → USDT
+
+    now   = datetime.utcnow().isoformat()
+    rows: list[dict] = []
 
     for b in ASSETS:
         for q in ASSETS:
+  
             if b == q or b not in base or q not in base:
                 continue
-            if b == "USDT":
-                price = 1 / base[q]                 # USDT→COIN/RUB
-            elif q == "USDT":
-                price = base[b]                     # COIN/RUB→USDT
-            else:
-                price = base[b] / base[q]           # COIN↔COIN/RUB
-            rows.append({
-                "source": "derived",
-                "base": b,
-                "quote": q,
-                "last_price": round(price, 8),
-                "updated_at": now,
-            })
+
+  
+            if b == "USDT":          # USDT → COIN / RUB
+                price = 1 / base[q]
+            elif q == "USDT":        # COIN / RUB → USDT
+                price = base[b]
+            else:                    # COIN ↔ COIN / RUB
+                price = base[b] / base[q]
+
+            last = round(price, 8)
+
+            rows.append(
+                {
+                    "source":     "derived",
+                    "base":       b,
+                    "quote":      q,
+                    "last_price": last,
+                    "sell":       round(last * (1 + DERIVED_SELL_FEE), 8),
+                    "buy":        round(last * (1 + DERIVED_BUY_FEE),  8),
+                    "updated_at": now,
+                }
+            )
+
     return rows
 
 async def upsert_full_matrix():
@@ -132,8 +145,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 CHAT_ID = "@KaliningradCryptoKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
-KENIG_ASK_OFFSET = 1.0  # +к продаже
-KENIG_BID_OFFSET = -0.9  # +к покупке
+KENIG_ASK_OFFSET = 1.0  
+KENIG_BID_OFFSET = -0.9  
+DERIVED_SELL_FEE = 0.01   
+DERIVED_BUY_FEE  = -0.01 
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
