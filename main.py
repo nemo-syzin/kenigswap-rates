@@ -138,7 +138,7 @@ CHAT_ID = "@KaliningradCryptoKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
 KENIG_ASK_OFFSET = 1.0  # +к продаже
-KENIG_BID_OFFSET = -0.5  # +к покупке
+KENIG_BID_OFFSET = -0.9  # +к покупке
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
