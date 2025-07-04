@@ -21,7 +21,14 @@ load_dotenv()
 CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
            "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
-BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]    
+BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]   
+
+_SOURCE_PAIR = {
+    "kenig":      ("USDT", "RUB"),
+    "bestchange": ("USDT", "RUB"),
+    "energo":     ("USD",  "RUB"),
+}
+
 
 async def _fetch_bybit_basics() -> dict[str, float]:
 
@@ -145,29 +152,33 @@ logger = logging.getLogger(__name__)
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
-    """Записываем скрапер-курс (строка без base/quote)."""
-    payload = {
-        "source": source,
-        "sell": round(sell, 2),
-        "buy":  round(buy, 2),
-        "base": None,          # ← важно
-        "quote": None,         # ← важно
-        "updated_at": datetime.utcnow().isoformat(),
-    }
+    """Обновляем/вставляем курс для kenig/bestchange/energo."""
+    base, quote = _SOURCE_PAIR[source]
+
+    record = dict(
+        source      = source,
+        base        = base,
+        quote       = quote,
+        sell        = round(sell, 2),
+        buy         = round(buy, 2),
+        updated_at  = datetime.utcnow().isoformat(),
+    )
+
+    loop = asyncio.get_running_loop()
     try:
-        loop = asyncio.get_running_loop()
+
         await loop.run_in_executor(
             None,
             lambda: (
                 sb.table("kenig_rates")
-                  .upsert(payload, on_conflict="source,base,quote")  # ← изменили
+                  .upsert(record, on_conflict="source,base,quote")
                   .execute()
             ),
         )
         logger.info("Supabase upsert OK: %s", source)
+
     except Exception as e:
         logger.warning("Supabase upsert failed (%s): %s", source, e)
-
 # ────────────────── PLAYWRIGHT SETUP ─────────────────
 def install_chromium_for_playwright() -> None:
     try:
