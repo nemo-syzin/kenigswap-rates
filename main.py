@@ -35,7 +35,8 @@ async def _fetch_bybit_basics() -> dict[str, float]:
             "Accept":     "application/json",
             "Referer":    "https://www.bybit.com/",
         },
-        proxies=proxy,       # ← ключевая строка
+        proxies=proxy,
+        trust_env=False,
         timeout=10,
         follow_redirects=True,
     ) as cli:
@@ -221,7 +222,7 @@ async def fetch_bestchange_sell() -> Optional[float]:
     for a in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient() as c:
-                res = await c.get(url, timeout=15)
+                res = await c.get(url, timeout=15, trust_env=False)
                 soup = BeautifulSoup(res.text, "html.parser")
                 div = soup.find("div", class_="fs")
                 if div:
@@ -239,7 +240,7 @@ async def fetch_bestchange_buy() -> Optional[float]:
     for a in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as c:
-                res = await c.get(url, timeout=15)
+                res = await c.get(url, timeout=15, trust_env=False)
                 soup = BeautifulSoup(res.text, "html.parser")
                 table = soup.find("table", id="content_table")
                 row = table.find("tr", onclick=True)
@@ -263,7 +264,7 @@ async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[flo
     for a in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as c:
-                res = await c.get(url, timeout=15)
+                res = await c.get(url, timeout=15, trust_env=False)
                 soup = BeautifulSoup(res.text, "html.parser")
                 table = soup.find("table", class_="table-best white_bg")
                 usd_td = table.find("td", class_="title")
