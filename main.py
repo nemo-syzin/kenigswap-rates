@@ -175,15 +175,21 @@ def install_chromium_for_playwright() -> None:
         logger.warning("Playwright install error: %s", exc)
 
 # ───────────────────── SCRAPERS ──────────────────────
-GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
-TIMEOUT_MS = 30_000
 
-async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
+GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
+TIMEOUT_MS = 30_000         
+
+async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
+    """Возвращает (ask, bid) для пары USDT/RUB с Grinex или (None, None)."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
+                # proxy_cfg = {"server": os.getenv("GRINEX_PROXY")}
+                proxy_cfg = None         
+
                 browser = await p.chromium.launch(
                     headless=True,
+                    proxy=proxy_cfg,
                     args=["--disable-blink-features=AutomationControlled"],
                 )
                 context = await browser.new_context(
@@ -195,24 +201,30 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 )
                 page = await context.new_page()
                 await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                try:
+
+                with contextlib.suppress(Exception):
                     await page.locator("button:text('Accept')").click(timeout=3000)
-                except Exception:
-                    pass
+
                 ask_sel = "tbody.usdta7a5_ask.asks tr[data-price]"
                 bid_sel = "tbody.usdta7a5_bid.bids tr[data-price]"
+
                 await page.wait_for_selector(ask_sel, timeout=TIMEOUT_MS)
                 await page.wait_for_selector(bid_sel, timeout=TIMEOUT_MS)
+
                 ask = float(await page.locator(ask_sel).first.get_attribute("data-price"))
                 bid = float(await page.locator(bid_sel).first.get_attribute("data-price"))
+
+                await context.close()
                 await browser.close()
                 return ask, bid
+
         except Exception as e:
             logger.warning("Grinex attempt %s/%s failed: %s", attempt, MAX_RETRIES, e)
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
-    return None, None
 
+    return None, None
+           
 async def fetch_bestchange_sell() -> Optional[float]:
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
 
