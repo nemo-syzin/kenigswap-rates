@@ -230,7 +230,6 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 await asyncio.sleep(RETRY_DELAY)
     return None, None
 
-
 async def fetch_bestchange_sell() -> Optional[float]:
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
     for a in range(1, MAX_RETRIES + 1):
@@ -248,8 +247,7 @@ async def fetch_bestchange_sell() -> Optional[float]:
             if a < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
-
-
+    
 async def fetch_bestchange_buy() -> Optional[float]:
     url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
     for a in range(1, MAX_RETRIES + 1):
@@ -273,7 +271,6 @@ async def fetch_bestchange_buy() -> Optional[float]:
             if a < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
-
 
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
