@@ -3,7 +3,6 @@ import asyncio
 import html
 import logging
 import os
-import re    
 import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -17,34 +16,26 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from dotenv import load_dotenv
 load_dotenv() 
 
-
 # ───────── FULL-MATRIX HELPERS ────────
-BYBIT_PROXY = os.getenv("BYBIT_PROXY") or ""          # user:pass@host:port
-BYBIT_PROXIES = (
-    {                                                 
-        "https://api.bybit.com": f"http://{BYBIT_PROXY}",
-        "http://api.bybit.com":  f"http://{BYBIT_PROXY}",
-    } if BYBIT_PROXY else None
-)
 CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
            "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
 BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]    
 
-
 async def _fetch_bybit_basics() -> dict[str, float]:
 
     prices = {"USDT": 1.0}
     url     = "https://api.bybit.com/v5/market/tickers"
-    params  = {"category": "spot"}  
-    proxy   = os.getenv("BYBIT_PROXY")       
+    params  = {"category": "spot"}            # получаем сразу ВСЕ spot-пары
+    proxy   = os.getenv("BYBIT_PROXY")        # None → без прокси
+
     async with httpx.AsyncClient(
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept":     "application/json",
             "Referer":    "https://www.bybit.com/",
         },
-        proxies=proxy,  
+        proxies=proxy,       # ← ключевая строка
         timeout=10,
         follow_redirects=True,
     ) as cli:
@@ -63,11 +54,11 @@ async def _fetch_bybit_basics() -> dict[str, float]:
     return prices
 
 async def _get_usdt_rub() -> float:
-    return (await fetch_bestchange_sell()) or 80.0   
+    return (await fetch_bestchange_sell()) or 80.0   # Fallback
 
 async def _build_full_rows() -> list[dict]:
-    base = await _fetch_bybit_basics()          
-    base["RUB"] = 1 / await _get_usdt_rub()     
+    base = await _fetch_bybit_basics()           # цены COIN→USDT
+    base["RUB"] = 1 / await _get_usdt_rub()         # RUB→USDT
     now = datetime.utcnow().isoformat()
     rows = []
 
@@ -76,11 +67,11 @@ async def _build_full_rows() -> list[dict]:
             if b == q or b not in base or q not in base:
                 continue
             if b == "USDT":
-                price = 1 / base[q]              
+                price = 1 / base[q]                 # USDT→COIN/RUB
             elif q == "USDT":
-                price = base[b]                   
+                price = base[b]                     # COIN/RUB→USDT
             else:
-                price = base[b] / base[q]       
+                price = base[b] / base[q]           # COIN↔COIN/RUB
             rows.append({
                 "source": "derived",
                 "base": b,
@@ -89,7 +80,6 @@ async def _build_full_rows() -> list[dict]:
                 "updated_at": now,
             })
     return rows
-
 
 async def upsert_full_matrix():
     rows = await _build_full_rows()
@@ -156,15 +146,14 @@ logger = logging.getLogger(__name__)
 # ────────────────── SUPABASE ────────────────────────
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
     """Записываем скрапер-курс (строка без base/quote)."""
     payload = {
         "source": source,
         "sell": round(sell, 2),
         "buy":  round(buy, 2),
-        "base": None,        
-        "quote": None,     
+        "base": None,          # ← важно
+        "quote": None,         # ← важно
         "updated_at": datetime.utcnow().isoformat(),
     }
     try:
@@ -173,14 +162,13 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
             None,
             lambda: (
                 sb.table("kenig_rates")
-                  .upsert(payload, on_conflict="source,base,quote") 
+                  .upsert(payload, on_conflict="source,base,quote")  # ← изменили
                   .execute()
             ),
         )
         logger.info("Supabase upsert OK: %s", source)
     except Exception as e:
         logger.warning("Supabase upsert failed (%s): %s", source, e)
-
 
 # ────────────────── PLAYWRIGHT SETUP ─────────────────
 def install_chromium_for_playwright() -> None:
@@ -189,11 +177,9 @@ def install_chromium_for_playwright() -> None:
     except Exception as exc:
         logger.warning("Playwright install error: %s", exc)
 
-
 # ───────────────────── SCRAPERS ──────────────────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 30_000
-
 
 async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
     for attempt in range(1, MAX_RETRIES + 1):
@@ -247,7 +233,7 @@ async def fetch_bestchange_sell() -> Optional[float]:
             if a < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
-    
+
 async def fetch_bestchange_buy() -> Optional[float]:
     url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
     for a in range(1, MAX_RETRIES + 1):
@@ -295,11 +281,9 @@ async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[flo
                 await asyncio.sleep(RETRY_DELAY)
     return None, None, None
 
-
 # ───────────────── TELEGRAM HANDLERS ────────────────
 def is_authorized(uid: int) -> bool:
     return uid in AUTHORIZED_USERS
-
 
 async def auth(update, context):
     if len(context.args) != 1:
@@ -311,14 +295,11 @@ async def auth(update, context):
     else:
         await update.message.reply_text("Неверный пароль.")
 
-
 async def start(update, context):
     await update.message.reply_text("Бот активен. Используйте /auth <пароль>.")
 
-
 async def help_command(update, context):
     await update.message.reply_text("/start /auth /check /change /show_offsets /help")
-
 
 async def check(update, context):
     if not is_authorized(update.effective_user.id):
@@ -326,7 +307,6 @@ async def check(update, context):
         return
     await send_rates_message(context.application)
     await update.message.reply_text("Курсы отправлены.")
-
 
 async def change_offsets(update, context):
     if not is_authorized(update.effective_user.id):
@@ -339,13 +319,11 @@ async def change_offsets(update, context):
     except Exception:
         await update.message.reply_text("Пример: /change 1.0 -0.5")
 
-
 async def show_offsets(update, context):
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("Нет доступа.")
         return
     await update.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}")
-
 
 # ───────────────── SEND RATES MSG ───────────────────
 async def send_rates_message(app):
@@ -415,7 +393,6 @@ async def send_rates_message(app):
     if tasks:
         await asyncio.gather(*tasks)
 
-
 # ───────────────────── MAIN ─────────────────────────
 def main() -> None:
     install_chromium_for_playwright()
@@ -430,6 +407,7 @@ def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
+    # — отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
         send_rates_message,
         trigger="interval",
@@ -439,6 +417,7 @@ def main() -> None:
         args=[app],
     )
 
+    # — генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
         refresh_full_matrix,
         trigger="interval",
@@ -450,7 +429,6 @@ def main() -> None:
 
     logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
