@@ -34,8 +34,8 @@ async def _fetch_bybit_basics() -> dict[str, float]:
 
     prices = {"USDT": 1.0}
     url     = "https://api.bybit.com/v5/market/tickers"
-    params  = {"category": "spot"}            # получаем сразу ВСЕ spot-пары
-    proxy   = os.getenv("BYBIT_PROXY")        # None → без прокси
+    params  = {"category": "spot"}          
+    proxy   = os.getenv("BYBIT_PROXY")       
 
     async with httpx.AsyncClient(
         headers={
@@ -63,11 +63,11 @@ async def _fetch_bybit_basics() -> dict[str, float]:
     return prices
 
 async def _get_usdt_rub() -> float:
-    return (await fetch_bestchange_sell()) or 80.0   # Fallback
+    return (await fetch_bestchange_sell()) or 80.0  
 
 async def _build_full_rows() -> list[dict]:
-    base = await _fetch_bybit_basics()           # цены COIN→USDT
-    base["RUB"] = 1 / await _get_usdt_rub()         # RUB→USDT
+    base = await _fetch_bybit_basics()        
+    base["RUB"] = 1 / await _get_usdt_rub() 
     now = datetime.utcnow().isoformat()
     rows = []
 
@@ -152,7 +152,7 @@ logger = logging.getLogger(__name__)
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
-    """Обновляем/вставляем курс для kenig/bestchange/energo."""
+
     base, quote = _SOURCE_PAIR[source]
 
     record = dict(
@@ -161,6 +161,7 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
         quote       = quote,
         sell        = round(sell, 2),
         buy         = round(buy, 2),
+        last_price  = round((sell + buy) / 2, 4),
         updated_at  = datetime.utcnow().isoformat(),
     )
 
