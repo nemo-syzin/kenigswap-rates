@@ -176,35 +176,33 @@ def install_chromium_for_playwright() -> None:
         logger.warning("Playwright install error: %s", exc)
 
 # ───────────────────── SCRAPERS ──────────────────────
-
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
-TIMEOUT_MS = 30_000         
+TIMEOUT_MS = 60_000          
 
 async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
-    """Возвращает (ask, bid) для пары USDT/RUB с Grinex или (None, None)."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
-                # proxy_cfg = {"server": os.getenv("GRINEX_PROXY")}
-                proxy_cfg = None         
-
+               
                 browser = await p.chromium.launch(
                     headless=True,
-                    proxy=proxy_cfg,
-                    args=["--disable-blink-features=AutomationControlled"],
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--proxy-server='direct://'",
+                        "--proxy-bypass-list=*",
+                    ],
                 )
+
                 context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/123.0.0.0 Safari/537.36"
-                    )
+                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/123.0.0.0 Safari/537.36")
                 )
                 page = await context.new_page()
                 await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
 
                 with contextlib.suppress(Exception):
-                    await page.locator("button:text('Accept')").click(timeout=3000)
+                    await page.locator("button:text('Accept')").click(timeout=3_000)
 
                 ask_sel = "tbody.usdta7a5_ask.asks tr[data-price]"
                 bid_sel = "tbody.usdta7a5_bid.bids tr[data-price]"
@@ -215,7 +213,6 @@ async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
                 ask = float(await page.locator(ask_sel).first.get_attribute("data-price"))
                 bid = float(await page.locator(bid_sel).first.get_attribute("data-price"))
 
-                await context.close()
                 await browser.close()
                 return ask, bid
 
