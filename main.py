@@ -94,11 +94,7 @@ async def upsert_full_matrix():
     logger.info("Full matrix upserted: %s rows", len(rows))
 
 async def refresh_full_matrix() -> None:
-    """
-    Каждую минуту:
-    1) удаляем ВСЕ старые строки source='derived';
-    2) вставляем новую полную матрицу (462 строк).
-    """
+
     rows = await _build_full_rows()
     loop = asyncio.get_running_loop()
 
@@ -219,67 +215,99 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
 
 async def fetch_bestchange_sell() -> Optional[float]:
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
-    for a in range(1, MAX_RETRIES + 1):
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient() as c:
-                res = await c.get(url, timeout=15, trust_env=False)
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+                trust_env=False,       
+            ) as cli:
+                res = await cli.get(url)    
+                if res.status_code != 200:
+                    raise RuntimeError(f"HTTP {res.status_code}")
+
                 soup = BeautifulSoup(res.text, "html.parser")
                 div = soup.find("div", class_="fs")
                 if div:
-                    return float(
-                        "".join(ch for ch in div.text if ch.isdigit() or ch in ",.").replace(",", ".")
-                    )
-        except Exception as e:
-            logger.warning("BestChange sell attempt %s/%s: %s", a, MAX_RETRIES, e)
-            if a < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
-    return None
+                    raw = "".join(ch for ch in div.text if ch.isdigit() or ch in ",.")
+                    return float(raw.replace(",", "."))
 
+        except Exception as e:
+            logger.warning("BestChange sell attempt %s/%s: %s",
+                           attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)
+
+    return None
+           
 async def fetch_bestchange_buy() -> Optional[float]:
     url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
-    for a in range(1, MAX_RETRIES + 1):
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as c:
-                res = await c.get(url, timeout=15, trust_env=False)
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+                trust_env=False,            
+            ) as cli:
+                res = await cli.get(url)    
+                if res.status_code != 200:
+                    raise RuntimeError(f"HTTP {res.status_code}")
+
                 soup = BeautifulSoup(res.text, "html.parser")
                 table = soup.find("table", id="content_table")
-                row = table.find("tr", onclick=True)
+                row   = table.find("tr", onclick=True) if table else None
+                if not row:
+                    raise RuntimeError("Не найден ряд с ценой")
+
                 price_td = next(
-                    (td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text), None
+                    (td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text),
+                    None,
                 )
                 if price_td:
-                    return float(
-                        "".join(ch for ch in price_td.text if ch.isdigit() or ch in ",.").replace(
-                            ",", "."
-                        )
-                    )
+                    raw = "".join(ch for ch in price_td.text if ch.isdigit() or ch in ",.")
+                    return float(raw.replace(",", "."))
+
         except Exception as e:
-            logger.warning("BestChange buy attempt %s/%s: %s", a, MAX_RETRIES, e)
-            if a < MAX_RETRIES:
+            logger.warning("BestChange buy attempt %s/%s: %s",
+                           attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
+
     return None
 
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    for a in range(1, MAX_RETRIES + 1):
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as c:
-                res = await c.get(url, timeout=15, trust_env=False)
+            async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+                trust_env=False,           
+            ) as cli:
+                res = await cli.get(url)
+                if res.status_code != 200:
+                    raise RuntimeError(f"HTTP {res.status_code}")
+
                 soup = BeautifulSoup(res.text, "html.parser")
-                table = soup.find("table", class_="table-best white_bg")
-                usd_td = table.find("td", class_="title")
-                buy_td = usd_td.find_next("td")
-                sell_td = buy_td.find_next("td")
-                cbr_td = sell_td.find_next("td")
-                return (
-                    float(sell_td.text.replace(",", ".")),
-                    float(buy_td.text.replace(",", ".")),
-                    float(cbr_td.text.replace(",", ".")),
-                )
+                row  = soup.select_one("table.table-best.white_bg tr:has(td.title)")
+                if not row:
+                    raise RuntimeError("Не найден ряд с курсами")
+
+
+                buy, sell, cbr = [
+                    float(td.text.replace(",", ".")) for td in row.find_all("td")[1:4]
+                ]
+                return sell, buy, cbr
+
         except Exception as e:
-            logger.warning("Energo attempt %s/%s: %s", a, MAX_RETRIES, e)
-            if a < MAX_RETRIES:
+            logger.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
+
     return None, None, None
 
 # ───────────────── TELEGRAM HANDLERS ────────────────
