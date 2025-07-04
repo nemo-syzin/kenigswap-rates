@@ -3,6 +3,7 @@ import asyncio
 import html
 import logging
 import os
+import re    
 import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -18,6 +19,13 @@ load_dotenv()
 
 
 # ───────── FULL-MATRIX HELPERS ────────
+BYBIT_PROXY = os.getenv("BYBIT_PROXY") or ""          # user:pass@host:port
+BYBIT_PROXIES = (
+    {                                                 
+        "https://api.bybit.com": f"http://{BYBIT_PROXY}",
+        "http://api.bybit.com":  f"http://{BYBIT_PROXY}",
+    } if BYBIT_PROXY else None
+)
 CRYPTOS = ["BTC","ETH","SOL","XRP","LTC","ADA","DOGE","TRX","DOT","LINK",
            "AVAX","MATIC","BCH","ATOM","NEAR","ETC","FIL","UNI","ARB","APT"]
 ASSETS  = CRYPTOS + ["USDT", "RUB"]
@@ -28,16 +36,15 @@ async def _fetch_bybit_basics() -> dict[str, float]:
 
     prices = {"USDT": 1.0}
     url     = "https://api.bybit.com/v5/market/tickers"
-    params  = {"category": "spot"}            # получаем сразу ВСЕ spot-пары
-    proxy   = os.getenv("BYBIT_PROXY")        # None → без прокси
-
+    params  = {"category": "spot"}  
+    proxy   = os.getenv("BYBIT_PROXY")       
     async with httpx.AsyncClient(
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept":     "application/json",
             "Referer":    "https://www.bybit.com/",
         },
-        proxies=proxy,       # ← ключевая строка
+        proxies=proxy,  
         timeout=10,
         follow_redirects=True,
     ) as cli:
@@ -56,11 +63,11 @@ async def _fetch_bybit_basics() -> dict[str, float]:
     return prices
 
 async def _get_usdt_rub() -> float:
-    return (await fetch_bestchange_sell()) or 80.0   # Fallback
+    return (await fetch_bestchange_sell()) or 80.0   
 
 async def _build_full_rows() -> list[dict]:
-    base = await _fetch_bybit_basics()           # цены COIN→USDT
-    base["RUB"] = 1 / await _get_usdt_rub()         # RUB→USDT
+    base = await _fetch_bybit_basics()          
+    base["RUB"] = 1 / await _get_usdt_rub()     
     now = datetime.utcnow().isoformat()
     rows = []
 
@@ -69,11 +76,11 @@ async def _build_full_rows() -> list[dict]:
             if b == q or b not in base or q not in base:
                 continue
             if b == "USDT":
-                price = 1 / base[q]                 # USDT→COIN/RUB
+                price = 1 / base[q]              
             elif q == "USDT":
-                price = base[b]                     # COIN/RUB→USDT
+                price = base[b]                   
             else:
-                price = base[b] / base[q]           # COIN↔COIN/RUB
+                price = base[b] / base[q]       
             rows.append({
                 "source": "derived",
                 "base": b,
@@ -156,8 +163,8 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
         "source": source,
         "sell": round(sell, 2),
         "buy":  round(buy, 2),
-        "base": None,          # ← важно
-        "quote": None,         # ← важно
+        "base": None,        
+        "quote": None,     
         "updated_at": datetime.utcnow().isoformat(),
     }
     try:
@@ -166,7 +173,7 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
             None,
             lambda: (
                 sb.table("kenig_rates")
-                  .upsert(payload, on_conflict="source,base,quote")  # ← изменили
+                  .upsert(payload, on_conflict="source,base,quote") 
                   .execute()
             ),
         )
@@ -426,7 +433,6 @@ def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    # — отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
         send_rates_message,
         trigger="interval",
@@ -436,7 +442,6 @@ def main() -> None:
         args=[app],
     )
 
-    # — генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
         refresh_full_matrix,
         trigger="interval",
