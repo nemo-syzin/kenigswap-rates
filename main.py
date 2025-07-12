@@ -145,8 +145,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 CHAT_ID = "@KaliningradCryptoKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
-KENIG_ASK_OFFSET = 0.7 
-KENIG_BID_OFFSET = -1
+KENIG_ASK_OFFSET = 0.8
+KENIG_BID_OFFSET = -0.9
 DERIVED_SELL_FEE = 0.01   
 DERIVED_BUY_FEE  = -0.01 
 
