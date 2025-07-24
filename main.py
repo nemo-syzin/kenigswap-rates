@@ -142,7 +142,7 @@ PASSWORD = os.getenv("TG_BOT_PASS")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-CHAT_ID = "@KaliningradCryptoKenigSwap"
+CHAT_ID = "@KaliningradCryptoRatesKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
 KENIG_ASK_OFFSET = 0.8
