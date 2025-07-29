@@ -498,7 +498,8 @@ async def send_rates_message(app):
 
 # ───────────────────── MAIN ─────────────────────────
 def main() -> None:
-    install_chromium_for_playwright()
+
+    # install_chromium_for_playwright()
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -510,34 +511,30 @@ def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    # ─ отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
         send_rates_message,
-        trigger="interval",
+        'interval',
         minutes=2,
         seconds=30,
         timezone=KALININGRAD_TZ,
-        args=[app],          # ← передаём бота аргументом
+        args=[app],
     )
 
-    # ─ генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
         refresh_full_matrix,
-        trigger="interval",
+        'interval',
         minutes=1,
         timezone=KALININGRAD_TZ,
     )
 
-    # ─ пересчёт лимитов (min/max/reserve) каждую минуту
     scheduler.add_job(
-        update_limits_dynamic,      # корутину можно отдавать напрямую
-        trigger="interval",
+        update_limits_dynamic,
+        'interval',
         minutes=1,
         timezone=KALININGRAD_TZ,
     )
 
     scheduler.start()
-
     logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
 
