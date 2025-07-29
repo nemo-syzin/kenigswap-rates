@@ -347,6 +347,43 @@ async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[flo
 
     return None, None, None
 
+# ───────────────── LIMITS AUTO-UPDATE ───────────────
+MIN_EQ_USDT = 1_000       # эквивалент 1 000 USDT
+MAX_EQ_USDT = 1_000_000   # эквивалент 1 000 000 USDT
+RESERVE_EQ_USDT = 1_000_000
+
+async def update_limits_dynamic() -> None:
+
+    # 1. актуальные цены «валюта → USDT»
+    prices = await _fetch_bybit_basics()
+    prices["RUB"] = 1 / await _get_usdt_rub()
+    prices["USDT"] = 1.0
+
+    # 2. берём действующие пары
+    rows = sb.table("kenig_rates").select("id,base,quote").execute().data
+    if not rows:
+        return
+
+    updates = []
+    for row in rows:
+        base, quote = row["base"], row["quote"]
+        pb, pq = prices.get(base), prices.get(quote)
+        if not pb or not pq:
+            continue
+
+        updates.append({
+            "id": row["id"],                                    # первичный ключ
+            "min_amount": round(MIN_EQ_USDT / pb, 8),
+            "max_amount": round(MAX_EQ_USDT / pb, 8),
+            "reserve":    round(RESERVE_EQ_USDT / pq, 8),
+            "updated_at": datetime.utcnow().isoformat()
+        })
+
+    if updates:
+        sb.table("kenig_rates").upsert(updates, on_conflict="id").execute()
+        logger.info("✔ limits updated for %s pairs", len(updates))
+# ─────────────────────────────────────────────────────
+
 # ───────────────── TELEGRAM HANDLERS ────────────────
 def is_authorized(uid: int) -> bool:
     return uid in AUTHORIZED_USERS
@@ -486,6 +523,7 @@ def main() -> None:
     # — генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
         refresh_full_matrix,
+        lambda: asyncio.create_task(update_limits_dynamic()),       
         trigger="interval",
         minutes=1,
         timezone=KALININGRAD_TZ,
