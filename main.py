@@ -245,10 +245,14 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
 
 # ────────────────── PLAYWRIGHT SETUP ─────────────────
 def install_chromium_for_playwright() -> None:
+
     try:
-        subprocess.run(["playwright", "install", "--with-deps", "chromium"], check=True)
-    except Exception as exc:
-        logger.warning("Playwright install error: %s", exc)
+        # --force перекачает, только если браузера нет
+        subprocess.run(["playwright", "install", "chromium", "--force"],
+                       check=True)
+        logger.info("Playwright browser installed")
+    except subprocess.CalledProcessError as exc:
+        logger.error("Playwright install failed: %s", exc)
 
 # ───────────────────── SCRAPERS ──────────────────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
