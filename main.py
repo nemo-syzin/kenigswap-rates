@@ -1,11 +1,3 @@
-"""
-KenigSwap rates bot — исправленная версия.
-
-• Playwright ищет браузер в /opt/render/.cache/ms-playwright  
-• refresh_full_matrix → upsert (больше нет дубликатов)  
-• update_limits_dynamic запускается на 30 с позже, чтобы не конфликтовать  
-• Telegram-бот запущен с concurrent_updates(False) и перехватывает Conflict  
-"""
 
 # ───────────────────── IMPORTS ──────────────────────
 from __future__ import annotations
