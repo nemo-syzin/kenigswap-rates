@@ -383,8 +383,6 @@ async def update_limits_dynamic() -> None:
             updates, on_conflict="source,base,quote"
         ).execute()
         logger.info("✔ limits updated for %s pairs", len(updates))
-# ─────────────────────────────────────────────────────
-
 # ───────────────── TELEGRAM HANDLERS ────────────────
 def is_authorized(uid: int) -> bool:
     return uid in AUTHORIZED_USERS
