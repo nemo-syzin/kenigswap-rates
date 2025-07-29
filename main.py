@@ -353,14 +353,11 @@ MAX_EQ_USDT = 1_000_000   # эквивалент 1 000 000 USDT
 RESERVE_EQ_USDT = 1_000_000
 
 async def update_limits_dynamic() -> None:
-
-    # 1. актуальные цены «валюта → USDT»
     prices = await _fetch_bybit_basics()
     prices["RUB"] = 1 / await _get_usdt_rub()
     prices["USDT"] = 1.0
 
-    # 2. берём действующие пары
-    rows = sb.table("kenig_rates").select("id,base,quote").execute().data
+    rows = sb.table("kenig_rates").select("source,base,quote").execute().data
     if not rows:
         return
 
@@ -372,15 +369,19 @@ async def update_limits_dynamic() -> None:
             continue
 
         updates.append({
-            "id": row["id"],                                    # первичный ключ
+            "source": row["source"],
+            "base": row["base"],
+            "quote": row["quote"],
             "min_amount": round(MIN_EQ_USDT / pb, 8),
             "max_amount": round(MAX_EQ_USDT / pb, 8),
-            "reserve":    round(RESERVE_EQ_USDT / pq, 8),
+            "reserve": round(RESERVE_EQ_USDT / pq, 8),
             "updated_at": datetime.utcnow().isoformat()
         })
 
     if updates:
-        sb.table("kenig_rates").upsert(updates, on_conflict="id").execute()
+        sb.table("kenig_rates").upsert(
+            updates, on_conflict="source,base,quote"
+        ).execute()
         logger.info("✔ limits updated for %s pairs", len(updates))
 # ─────────────────────────────────────────────────────
 
