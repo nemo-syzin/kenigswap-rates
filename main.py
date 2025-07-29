@@ -510,20 +510,27 @@ def main() -> None:
 
     scheduler = AsyncIOScheduler()
 
-    # — отправка сводного сообщения каждые 2 мин 30 с
+    # ─ отправка сводного сообщения каждые 2 мин 30 с
     scheduler.add_job(
         send_rates_message,
         trigger="interval",
         minutes=2,
         seconds=30,
         timezone=KALININGRAD_TZ,
-        args=[app],
+        args=[app],          # ← передаём бота аргументом
     )
 
-    # — генерация полной матрицы курсов каждую минуту
+    # ─ генерация полной матрицы курсов каждую минуту
     scheduler.add_job(
         refresh_full_matrix,
-        lambda: asyncio.create_task(update_limits_dynamic()),       
+        trigger="interval",
+        minutes=1,
+        timezone=KALININGRAD_TZ,
+    )
+
+    # ─ пересчёт лимитов (min/max/reserve) каждую минуту
+    scheduler.add_job(
+        update_limits_dynamic,      # корутину можно отдавать напрямую
         trigger="interval",
         minutes=1,
         timezone=KALININGRAD_TZ,
@@ -533,6 +540,7 @@ def main() -> None:
 
     logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
