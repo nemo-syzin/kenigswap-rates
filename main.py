@@ -276,46 +276,42 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
+# ───────── Energo parser ──────────
 async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[float]]:
-    
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/124.0.0.0 Safari/537.36"),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru,en;q=0.9",
+    headers = {                                   
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Referer": "https://ru.myfin.by/currency",
     }
 
     for a in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers=headers, timeout=15) as c:
-                res = await c.get(url, follow_redirects=True)
-                if res.status_code == 403:  # иногда Cloudflare
-                    raise RuntimeError("HTTP 403")
-                res.raise_for_status()
+                r = await c.get(url)
+                r.raise_for_status()              # бросит за 4xx/5xx
 
-                soup  = BeautifulSoup(res.text, "html.parser")
-                table = soup.find("table", class_="table-best")  # без white_bg на всякий случай
-                if not table:
-                    raise ValueError("rate table not found")
-
-                usd_row = next((tr for tr in table.select("tr") if "USD" in tr.text), None)
-                if not usd_row:
+                soup  = BeautifulSoup(r.text, "html.parser")
+                row   = soup.select_one("table.table-best.white_bg tr:has(td.title)")
+                if not row:
                     raise ValueError("USD row not found")
 
-                tds = usd_row.find_all("td")
-                buy  = float(tds[1].text.replace(",", "."))
-                sell = float(tds[2].text.replace(",", "."))
-                cbr  = float(tds[3].text.replace(",", "."))
+                buy, sell, cbr = [
+                    float(td.text.replace(",", "."))
+                    for td in row.find_all("td")[1:4]
+                ]
                 return sell, buy, cbr
 
         except Exception as e:
-            logger.warning("Energo attempt %s/%s: %s", a, MAX_RETRIES, e)
+            log.warning("Energo attempt %s/%s: %s", a, MAX_RETRIES, e)   # ◆ logger → log
             if a < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-    # три неудачных прогона
+    # всё совсем плохо
     return None, None, None
 
 # ──────────────── TELEGRAM BOT ──────────────────────
