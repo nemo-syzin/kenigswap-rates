@@ -1,15 +1,16 @@
 # ───────────────────── IMPORTS ──────────────────────
-import asyncio, html, logging, os, subprocess, contextlib
+import asyncio, contextlib, html, logging, os, subprocess
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional, Tuple
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
-from supabase import create_client, Client
-from telegram.ext import ApplicationBuilder, CommandHandler
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
+from supabase import Client, create_client
+from telegram.ext import ApplicationBuilder, CommandHandler
 
 load_dotenv()
 
@@ -18,26 +19,27 @@ CRYPTOS = [
     "BTC", "ETH", "SOL", "XRP", "LTC", "ADA", "DOGE", "TRX", "DOT", "LINK",
     "AVAX", "MATIC", "BCH", "ATOM", "NEAR", "ETC", "FIL", "UNI", "ARB", "APT",
 ]
-ASSETS          = CRYPTOS + ["USDT", "RUB"]
-BYBIT_SYMBOLS   = [f"{c}USDT" for c in CRYPTOS]
+ASSETS        = CRYPTOS + ["USDT", "RUB"]
+BYBIT_SYMBOLS = [f"{c}USDT" for c in CRYPTOS]
 
-_SOURCE_PAIR = {              # base / quote для живых источников
+_SOURCE_PAIR = {
     "kenig":      ("USDT", "RUB"),
     "bestchange": ("USDT", "RUB"),
     "energo":     ("USD",  "RUB"),
 }
 
-TOKEN          = os.getenv("TG_BOT_TOKEN")
-PASSWORD       = os.getenv("TG_BOT_PASS")
-SUPABASE_URL   = os.getenv("SUPABASE_URL")
-SUPABASE_KEY   = os.getenv("SUPABASE_KEY")
+TOKEN        = os.getenv("TG_BOT_TOKEN")
+PASSWORD     = os.getenv("TG_BOT_PASS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 CHAT_ID        = "@KaliningradCryptoRatesKenigSwap"
 KALININGRAD_TZ = timezone(timedelta(hours=2))
 
 KENIG_ASK_OFFSET = 0.8
 KENIG_BID_OFFSET = -0.9
-DERIVED_SELL_FEE = 0.01        # +1 %
-DERIVED_BUY_FEE  = -0.01       # −1 %
+DERIVED_SELL_FEE = 0.01      # +1 %
+DERIVED_BUY_FEE  = -0.01     # −1 %
 
 MIN_EQ_USDT     = 1_000
 MAX_EQ_USDT     = 1_000_000
@@ -52,25 +54,30 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("kenig_bot")
+logger = logging.getLogger("kenig_bot")   # ← используем везде одно имя
+log = logger                              # совместимость со старыми вызовами
 
 # ────────────────── SUPABASE ────────────────────────
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ────────────── PLAYWRIGHT (headless) ───────────────
 def install_chromium() -> None:
-    """Скачиваем Chromium без sudo (используется на Render/Heroku)."""
+    """
+    На Render/Heroku и т.п. нужно подтянуть бинарники Chromium (≈150 МБ).
+    Ставим env-переменную ПЕРЕД скачиванием, чтобы Playwright сложил
+    браузер в /home/.../.cache/ms-playwright
+    """
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-        log.info("Playwright browser installed")
+        logger.info("Playwright browser installed")
     except Exception as exc:
-        log.warning("Playwright install error: %s", exc)
+        logger.warning("Playwright install error: %s", exc)
 
 # ─────────────────── HELPERS ────────────────────────
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
     base, quote = _SOURCE_PAIR[source]
-    record = {
+    rec = {
         "source":           source,
         "exchange_source":  source,
         "base":             base,
@@ -91,34 +98,35 @@ async def upsert_rate(source: str, sell: float, buy: float) -> None:
     await loop.run_in_executor(
         None,
         lambda: sb.table("kenig_rates")
-                  .upsert(record, on_conflict="source,base,quote")
+                  .upsert(rec, on_conflict="source,base,quote")
                   .execute(),
     )
-    log.info("Supabase upsert OK: %s", source)
+    logger.info("Supabase upsert OK: %s", source)
+
 
 async def mark_inactive(source: str) -> None:
     base, quote = _SOURCE_PAIR[source]
-    sb.table("kenig_rates") \
-      .update({"is_active": False, "updated_at": datetime.utcnow().isoformat()}) \
-      .eq("source", source).eq("base", base).eq("quote", quote) \
+    sb.table("kenig_rates")\
+      .update({"is_active": False, "updated_at": datetime.utcnow().isoformat()})\
+      .eq("source", source).eq("base", base).eq("quote", quote)\
       .execute()
 
 # ─────────────── BYBIT SPOT API ─────────────────────
 async def fetch_bybit_prices() -> dict[str, float]:
-    url, params = "https://api.bybit.com/v5/market/tickers", {"category": "spot"}
+    url = "https://api.bybit.com/v5/market/tickers"
     prices: dict[str, float] = {"USDT": 1.0}
 
     async with httpx.AsyncClient(timeout=10) as cli:
-        r = await cli.get(url, params=params)
+        r = await cli.get(url, params={"category": "spot"})
         r.raise_for_status()
 
         for itm in r.json().get("result", {}).get("list", []):
-            sym = itm["symbol"]
-            if sym in BYBIT_SYMBOLS:
-                prices[sym[:-4]] = float(itm["lastPrice"])
+            if itm["symbol"] in BYBIT_SYMBOLS:
+                prices[itm["symbol"][:-4]] = float(itm["lastPrice"])
 
-    log.info("Bybit prices fetched: %s / 20", len(prices) - 1)
+    logger.info("Bybit prices fetched: %s / 20", len(prices) - 1)
     return prices
+
 
 async def get_usdt_rub_fiat() -> float:
     return (await fetch_bestchange_sell()) or 80.0
@@ -126,7 +134,7 @@ async def get_usdt_rub_fiat() -> float:
 # ─────────────── FULL DERIVED MATRIX ────────────────
 async def build_matrix() -> list[dict]:
     basics        = await fetch_bybit_prices()
-    basics["RUB"] = 1 / await get_usdt_rub_fiat()      # RUB→USDT
+    basics["RUB"] = 1 / await get_usdt_rub_fiat()
     now_iso       = datetime.utcnow().isoformat()
     rows: list[dict] = []
 
@@ -134,31 +142,30 @@ async def build_matrix() -> list[dict]:
         for quote in ASSETS:
             if base == quote or base not in basics or quote not in basics:
                 continue
-
-            # конвертация через USDT
-            rate = (1 / basics[quote]) if base == "USDT" \
-                else basics[base] if quote == "USDT" \
-                else basics[base] / basics[quote]
+            rate = (1 / basics[quote]) if base == "USDT" else \
+                   basics[base] if quote == "USDT" else \
+                   basics[base] / basics[quote]
 
             last = round(rate, 8)
             rows.append({
-                "source":           "derived",
-                "exchange_source":  "bybit",
-                "base":             base,
-                "quote":            quote,
-                "last_price":       last,
-                "sell":             round(last * (1 + DERIVED_SELL_FEE), 8),
-                "buy":              round(last * (1 + DERIVED_BUY_FEE),  8),
-                "min_amount":       None,
-                "max_amount":       None,
-                "reserve":          None,
-                "conditions":       "KYC",
-                "working_hours":    "24/7",
-                "operational_mode": "manual",
-                "is_active":        True,
-                "updated_at":       now_iso,
+                "source":          "derived",
+                "exchange_source": "bybit",
+                "base":            base,
+                "quote":           quote,
+                "last_price":      last,
+                "sell":            round(last * (1 + DERIVED_SELL_FEE), 8),
+                "buy":             round(last * (1 + DERIVED_BUY_FEE),  8),
+                "min_amount":      None,
+                "max_amount":      None,
+                "reserve":         None,
+                "conditions":      "KYC",
+                "working_hours":   "24/7",
+                "operational_mode":"manual",
+                "is_active":       True,
+                "updated_at":      now_iso,
             })
     return rows
+
 
 async def refresh_full_matrix() -> None:
     rows = await build_matrix()
@@ -169,7 +176,7 @@ async def refresh_full_matrix() -> None:
     await loop.run_in_executor(
         None, lambda: sb.table("kenig_rates").insert(rows).execute()
     )
-    log.info("Full matrix refreshed: %s rows", len(rows))
+    logger.info("Full matrix refreshed: %s rows", len(rows))
 
 # ─────── LIMITS / RESERVE / is_active пересчёт ──────
 async def update_limits_dynamic() -> None:
@@ -180,37 +187,29 @@ async def update_limits_dynamic() -> None:
     if not rows:
         return
 
-    now      = datetime.utcnow().isoformat()
-    patched  = []
+    now = datetime.utcnow().isoformat()
+    patched = []
 
     for r in rows:
-        b, q = r["base"], r["quote"]
-        pb, pq = prices.get(b), prices.get(q)
-
+        pb, pq = prices.get(r["base"]), prices.get(r["quote"])
         if not pb or not pq:
             patched.append({**r, "is_active": False, "updated_at": now})
             continue
-
         patched.append({
             **r,
-            "min_amount":       round(MIN_EQ_USDT / pb, 8),
-            "max_amount":       round(MAX_EQ_USDT / pb, 8),
-            "reserve":          round(RESERVE_EQ_USDT / pq, 8),
-            "conditions":       "KYC",
-            "working_hours":    "24/7",
-            "operational_mode": "manual",
-            "is_active":        True,
-            "updated_at":       now,
+            "min_amount":  round(MIN_EQ_USDT / pb, 8),
+            "max_amount":  round(MAX_EQ_USDT / pb, 8),
+            "reserve":     round(RESERVE_EQ_USDT / pq, 8),
+            "is_active":   True,
+            "updated_at":  now,
         })
 
     sb.table("kenig_rates").upsert(patched, on_conflict="source,base,quote").execute()
-    log.info("✔ limits updated for %s pairs", len(patched))
+    logger.info("✔ limits updated for %s pairs", len(patched))
 
 # ───────────────────── SCRAPERS ──────────────────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 30_000
-
-# Общий набор правильных заголовков
 HEADERS_FULL = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -225,9 +224,9 @@ HEADERS_FULL = {
     "DNT": "1",
 }
 
-async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
-    """Возвращает (ask, bid) USDT/RUB c биржи Grinex."""
-    for attempt in range(1, MAX_RETRIES + 1):
+
+async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
+    for att in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
@@ -236,7 +235,7 @@ async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
                 ctx = await browser.new_context(user_agent=HEADERS_FULL["User-Agent"])
                 page = await ctx.new_page()
                 await page.goto(GRINEX_URL, timeout=TIMEOUT_MS, wait_until="domcontentloaded")
-                # если всплывает cookie-баннер
+
                 with contextlib.suppress(Exception):
                     await page.locator("button:text('Accept')").click(timeout=3000)
 
@@ -250,110 +249,104 @@ async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
                 await browser.close()
                 return ask, bid
         except Exception as e:
-            logger.warning("Grinex attempt %s/%s failed: %s", attempt, MAX_RETRIES, e)
-            if attempt < MAX_RETRIES:
+            logger.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
+            if att < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None, None
 
 
 async def fetch_bestchange_sell() -> Optional[float]:
-    """RUB→USDT (наличные→крипта) – лучшая цена продажи с BestChange."""
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
-    for attempt in range(1, MAX_RETRIES + 1):
+    for att in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers=HEADERS_FULL, timeout=15) as cli:
-                html_page = (await cli.get(url)).text
-            soup = BeautifulSoup(html_page, "html.parser")
-            fs_div = soup.find("div", class_="fs")
-            if fs_div:
-                return float("".join(ch for ch in fs_div.text if ch.isdigit() or ch in ",.").replace(",", "."))
+                soup = BeautifulSoup((await cli.get(url)).text, "html.parser")
+            div = soup.find("div", class_="fs")
+            if div:
+                return float("".join(c for c in div.text if c.isdigit() or c in ",.")
+                             .replace(",", "."))
         except Exception as e:
-            logger.warning("BestChange sell attempt %s/%s: %s", attempt, MAX_RETRIES, e)
-            if attempt < MAX_RETRIES:
+            logger.warning("BestChange sell attempt %s/%s: %s", att, MAX_RETRIES, e)
+            if att < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
 
 async def fetch_bestchange_buy() -> Optional[float]:
-    """USDT→RUB (крипта→наличные) – лучшая цена покупки с BestChange."""
     url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
-    for attempt in range(1, MAX_RETRIES + 1):
+    for att in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers=HEADERS_FULL, timeout=15) as cli:
-                html_page = (await cli.get(url)).text
-            soup = BeautifulSoup(html_page, "html.parser")
+                soup = BeautifulSoup((await cli.get(url)).text, "html.parser")
             row = soup.select_one("table#content_table tr[onclick]")
-            td_price = next((td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text), None)
-            if td_price:
-                return float("".join(ch for ch in td_price.text if ch.isdigit() or ch in ",.").replace(",", "."))
+            td = next((td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text), None)
+            if td:
+                return float("".join(c for c in td.text if c.isdigit() or c in ",.")
+                             .replace(",", "."))
         except Exception as e:
-            logger.warning("BestChange buy attempt %s/%s: %s", attempt, MAX_RETRIES, e)
-            if attempt < MAX_RETRIES:
+            logger.warning("BestChange buy attempt %s/%s: %s", att, MAX_RETRIES, e)
+            if att < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
 
-async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """Возвращает (sell, buy, cbr) для USD/RUB в отделении Энерготрансбанка Калининграда."""
+async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-
-    for attempt in range(1, MAX_RETRIES + 1):
+    for att in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(headers=HEADERS_FULL, follow_redirects=True, timeout=15) as cli:
+            async with httpx.AsyncClient(headers=HEADERS_FULL,
+                                         follow_redirects=True, timeout=15) as cli:
                 resp = await cli.get(url)
                 resp.raise_for_status()
+
             soup = BeautifulSoup(resp.text, "html.parser")
             row = soup.select_one("table.table-best.white_bg tr:has(td.title)")
             if not row:
                 raise ValueError("USD row not found")
 
-            buy, sell, cbr = [
-                float(td.text.replace(",", "."))
-                for td in row.find_all("td")[1:4]
-            ]
+            buy, sell, cbr = [float(td.text.replace(",", ".")) for td in row.find_all("td")[1:4]]
             return sell, buy, cbr
 
         except Exception as e:
-            logger.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
-            if attempt < MAX_RETRIES:
+            logger.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
+            if att < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-    # три провала подряд → пробуем хотя бы курс ЦБ
+    # fallback – хотя бы курс ЦБ
     try:
         js = (await httpx.AsyncClient(timeout=10)
               .get("https://www.cbr-xml-daily.ru/daily_json.js")).json()
-        cbr_only = round(js["Valute"]["USD"]["Value"], 2)
-        return None, None, cbr_only
+        return None, None, round(js["Valute"]["USD"]["Value"], 2)
     except Exception:
         return None, None, None
 
-
 # ──────────────── TELEGRAM BOT ──────────────────────
-def _auth_ok(uid: int) -> bool:
+def _auth(uid: int) -> bool:
     return uid in AUTHORIZED_USERS
 
-async def cmd_auth(update, ctx):
-    if len(ctx.args) != 1:
-        await update.message.reply_text("Используйте: /auth <пароль>")
-        return
-    if ctx.args[0] == PASSWORD:
-        AUTHORIZED_USERS.add(update.effective_user.id)
-        await update.message.reply_text("✅ Доступ разрешён.")
-    else:
-        await update.message.reply_text("❌ Неверный пароль.")
 
 async def cmd_start(u, _): await u.message.reply_text("Бот активен. /help")
 async def cmd_help(u, _):  await u.message.reply_text("/start /auth /check /change /show_offsets /help")
 
+async def cmd_auth(u, ctx):
+    if len(ctx.args) != 1:
+        await u.message.reply_text("Используйте: /auth <пароль>")
+        return
+    if ctx.args[0] == PASSWORD:
+        AUTHORIZED_USERS.add(u.effective_user.id)
+        await u.message.reply_text("✅ Доступ разрешён.")
+    else:
+        await u.message.reply_text("❌ Неверный пароль.")
+
 async def cmd_check(u, ctx):
-    if not _auth_ok(u.effective_user.id):
+    if not _auth(u.effective_user.id):
         await u.message.reply_text("Нет доступа. /auth <пароль>")
         return
     await send_rates_message(ctx.application)
     await u.message.reply_text("Отчёт выслан.")
 
 async def cmd_change(u, ctx):
-    if not _auth_ok(u.effective_user.id):
+    if not _auth(u.effective_user.id):
         await u.message.reply_text("Нет доступа.")
         return
     try:
@@ -364,12 +357,12 @@ async def cmd_change(u, ctx):
         await u.message.reply_text("Пример: /change 1.0 -0.5")
 
 async def cmd_show(u, _):
-    if not _auth_ok(u.effective_user.id):
+    if not _auth(u.effective_user.id):
         await u.message.reply_text("Нет доступа.")
         return
     await u.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  |  Bid {KENIG_BID_OFFSET}")
 
-# ───────────────  SUMMARY MESSAGE  ──────────────────
+# ───────────────  SUMMARY MESSAGE  ──────────────
 async def send_rates_message(app):
     bc_sell = await fetch_bestchange_sell()
     bc_buy  = await fetch_bestchange_buy()
@@ -379,28 +372,24 @@ async def send_rates_message(app):
     ts = datetime.now(KALININGRAD_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines = [ts, ""]
 
-    # KenigSwap
-    lines.append("KenigSwap rate USDT/RUB")
-    if gr_ask and gr_bid:
-        lines.append(f"Продажа: {gr_ask + KENIG_ASK_OFFSET:.2f} ₽, "
-                     f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽")
-    else:
-        lines.append("— нет данных —")
+    lines.append("KenigSwap USDT/RUB")
+    lines.append(
+        f"Продажа: {gr_ask + KENIG_ASK_OFFSET:.2f} ₽, "
+        f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽"
+        if gr_ask and gr_bid else "— нет данных —"
+    )
     lines.append("")
 
-    # BestChange
-    lines.append("BestChange rate USDT/RUB")
-    if bc_sell and bc_buy:
-        lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽")
-    else:
-        lines.append("— нет данных —")
+    lines.append("BestChange USDT/RUB")
+    lines.append(
+        f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽"
+        if bc_sell and bc_buy else "— нет данных —"
+    )
     lines.append("")
 
-    # EnergoTransBank
-    lines.append("EnergoTransBank rate USD/RUB")
-    if en_sell and en_buy and en_cbr:
-        lines.append(f"Продажа: {en_sell:.2f} ₽, "
-                     f"Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽")
+    lines.append("EnergoTransBank USD/RUB")
+    if en_sell and en_buy:
+        lines.append(f"Продажа: {en_sell:.2f} ₽, Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽")
     elif en_cbr:
         lines.append(f"— нет данных банка — | ЦБ: {en_cbr:.2f} ₽")
     else:
@@ -416,9 +405,9 @@ async def send_rates_message(app):
             disable_web_page_preview=True,
         )
     except Exception as e:
-        log.error("Send error: %s", e)
+        logger.error("Send error: %s", e)
 
-    # live-источники Supabase
+    # Supabase live-источники
     if gr_ask and gr_bid:
         await upsert_rate("kenig", gr_ask + KENIG_ASK_OFFSET, gr_bid + KENIG_BID_OFFSET)
     else:
@@ -439,7 +428,6 @@ def main() -> None:
     install_chromium()
 
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start",        cmd_start))
     app.add_handler(CommandHandler("help",         cmd_help))
     app.add_handler(CommandHandler("auth",         cmd_auth))
@@ -448,13 +436,13 @@ def main() -> None:
     app.add_handler(CommandHandler("show_offsets", cmd_show))
 
     sched = AsyncIOScheduler()
-    sched.add_job(refresh_full_matrix,  trigger="interval", minutes=1, timezone=KALININGRAD_TZ)
-    sched.add_job(update_limits_dynamic, trigger="interval", minutes=1, seconds=5, timezone=KALININGRAD_TZ)
-    sched.add_job(send_rates_message,    trigger="interval", minutes=2, seconds=30,
+    sched.add_job(refresh_full_matrix,  "interval", minutes=1, timezone=KALININGRAD_TZ)
+    sched.add_job(update_limits_dynamic,"interval", minutes=1, seconds=5, timezone=KALININGRAD_TZ)
+    sched.add_job(send_rates_message,   "interval", minutes=2, seconds=30,
                   timezone=KALININGRAD_TZ, args=[app])
-
     sched.start()
-    log.info("Bot started.")
+
+    logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
