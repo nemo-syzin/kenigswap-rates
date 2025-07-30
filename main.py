@@ -271,22 +271,52 @@ async def fetch_bestchange_buy() -> Optional[float]:
     return None
 
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Курсы Энерготрансбанка (Калининград): buy / sell / ЦБ.
+    Возвращает (buy, sell, cbr) или (None, None, None) при неудаче.
+    """
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    for att in range(1, MAX_RETRIES + 1):
-        try:
-            async with httpx.AsyncClient(timeout=15) as cli:
-                res = await cli.get(url)
-                res.raise_for_status()
-                soup = BeautifulSoup(res.text, "html.parser")
-                row  = soup.select_one("table.table-best.white_bg tr:has(td.title)")
-                if not row:
-                    raise ValueError("table row not found")
-                buy, sell, cbr = [float(td.text.replace(",", ".")) for td in row.find_all("td")[1:4]]
-                return sell, buy, cbr
-        except Exception as e:
-            log.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
+
+    # один и тот же клиент внутри цикла, чтобы переиспользовать keep-alive
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0"}
+    ) as client:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = await client.get(url, timeout=15)
+                resp.raise_for_status()
+
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # оба возможных варианта класса таблицы
+                table = soup.select_one("table.table-best.white_bg, table.table-best_white_bg")
+                if table is None:
+                    raise ValueError("Курс-таблица не найдена")
+
+                # ищем строку с USD / Доллар США
+                row = next(
+                    (
+                        tr for tr in table.select("tbody > tr")
+                        if (td := tr.find("td", class_="title"))
+                        and any(x in td.get_text(strip=True).lower() for x in ("usd", "доллар"))
+                    ),
+                    None
+                )
+                if row is None:
+                    raise ValueError("Строка USD не найдена")
+
+                cells = row.find_all("td")
+                buy = float(cells[1].get_text(strip=True).replace(",", "."))
+                sell = float(cells[2].get_text(strip=True).replace(",", "."))
+                cbr = float(cells[3].get_text(strip=True).replace(",", "."))
+
+                return buy, sell, cbr
+
+            except Exception as e:
+                logger.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY)
+
     return None, None, None
 
 # ──────── TELEGRAM HANDLERS ────────
