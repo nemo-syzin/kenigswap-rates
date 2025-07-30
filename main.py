@@ -295,9 +295,7 @@ async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[flo
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(
-                headers=HEADERS_FULL,
-                follow_redirects=True,
-                timeout=15
+                headers=HEADERS_FULL, follow_redirects=True, timeout=15
             ) as cli:
                 resp = await cli.get(url)
                 resp.raise_for_status()
@@ -314,11 +312,12 @@ async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[flo
             return sell, buy, cbr
 
         except Exception as e:
+            # БЫЛО: logger.warning(...)
             log.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-    # fallback: пробуем взять хотя бы курс ЦБ, чтобы не выводить «нет данных»
+    # fallback: берём курс ЦБ РФ, если банк продолжает отдавать 403
     try:
         js = (await httpx.AsyncClient(timeout=10)
               .get("https://www.cbr-xml-daily.ru/daily_json.js")).json()
