@@ -270,51 +270,49 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
-async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Курсы Энерготрансбанка (Калининград): buy / sell / ЦБ.
-    Возвращает (buy, sell, cbr) или (None, None, None) при неудаче.
-    """
-    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
+async def fetch_energo() -> tuple[float | None, float | None, float | None]:
 
-    # один и тот же клиент внутри цикла, чтобы переиспользовать keep-alive
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0"}
-    ) as client:
-        for attempt in range(1, MAX_RETRIES + 1):
+    url   = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
+    hdrs  = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        ),
+        "Referer": "https://ru.myfin.by/currency",
+    }
+
+    async with httpx.AsyncClient(headers=hdrs, follow_redirects=True) as cli:
+        for att in range(1, MAX_RETRIES + 1):
             try:
-                resp = await client.get(url, timeout=15)
-                resp.raise_for_status()
+                r = await cli.get(url, timeout=15)
+                r.raise_for_status()
 
-                soup = BeautifulSoup(resp.text, "html.parser")
-
-                # оба возможных варианта класса таблицы
+                soup  = BeautifulSoup(r.text, "html.parser")
                 table = soup.select_one("table.table-best.white_bg, table.table-best_white_bg")
-                if table is None:
-                    raise ValueError("Курс-таблица не найдена")
+                if not table:
+                    raise RuntimeError("Таблица с курсами не найдена")
 
-                # ищем строку с USD / Доллар США
                 row = next(
                     (
-                        tr for tr in table.select("tbody > tr")
-                        if (td := tr.find("td", class_="title"))
-                        and any(x in td.get_text(strip=True).lower() for x in ("usd", "доллар"))
+                        tr for tr in table.select("tr")
+                        if tr.find("td") and
+                           re.search(r"(usd|доллар)", tr.find("td").get_text(strip=True), re.I)
                     ),
-                    None
+                    None,
                 )
-                if row is None:
-                    raise ValueError("Строка USD не найдена")
+                if not row:
+                    raise RuntimeError("Строка USD не найдена")
 
-                cells = row.find_all("td")
-                buy = float(cells[1].get_text(strip=True).replace(",", "."))
-                sell = float(cells[2].get_text(strip=True).replace(",", "."))
-                cbr = float(cells[3].get_text(strip=True).replace(",", "."))
+                tds  = row.find_all("td")
+                buy  = float(tds[1].get_text(strip=True).replace(",", "."))
+                sell = float(tds[2].get_text(strip=True).replace(",", "."))
+                cbr  = float(tds[3].get_text(strip=True).replace(",", "."))
 
-                return buy, sell, cbr
+                return sell, buy, cbr   # ← порядок, который ждёт основной код
 
             except Exception as e:
-                logger.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
-                if attempt < MAX_RETRIES:
+                log.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
+                if att < MAX_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)
 
     return None, None, None
