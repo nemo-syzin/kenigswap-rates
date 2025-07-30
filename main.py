@@ -206,17 +206,39 @@ async def update_limits_dynamic() -> None:
     sb.table("kenig_rates").upsert(patched, on_conflict="source,base,quote").execute()
     log.info("✔ limits updated for %s pairs", len(patched))
 
-# ──────────────── SCRAPERS (HTTP/HTML) ──────────────
-GRINEX_URL, TIMEOUT_MS = "https://grinex.io/trading/usdta7a5?lang=en", 60_000
+# ───────────────────── SCRAPERS ──────────────────────
+GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
+TIMEOUT_MS = 30_000
 
-async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
-    for att in range(1, MAX_RETRIES + 1):
+# Общий набор правильных заголовков
+HEADERS_FULL = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://ru.myfin.by/currency",
+    "DNT": "1",
+}
+
+async def fetch_grinex_rate() -> tuple[Optional[float], Optional[float]]:
+    """Возвращает (ask, bid) USDT/RUB c биржи Grinex."""
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-                context = await browser.new_context()
-                page = await context.new_page()
+                browser = await p.chromium.launch(
+                    headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+                )
+                ctx = await browser.new_context(user_agent=HEADERS_FULL["User-Agent"])
+                page = await ctx.new_page()
                 await page.goto(GRINEX_URL, timeout=TIMEOUT_MS, wait_until="domcontentloaded")
+                # если всплывает cookie-баннер
+                with contextlib.suppress(Exception):
+                    await page.locator("button:text('Accept')").click(timeout=3000)
 
                 ask_sel = "tbody.usdta7a5_ask.asks tr[data-price]"
                 bid_sel = "tbody.usdta7a5_bid.bids tr[data-price]"
@@ -228,80 +250,60 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 await browser.close()
                 return ask, bid
         except Exception as e:
-            log.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
+            logger.warning("Grinex attempt %s/%s failed: %s", attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None, None
 
+
 async def fetch_bestchange_sell() -> Optional[float]:
+    """RUB→USDT (наличные→крипта) – лучшая цена продажи с BestChange."""
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
-    for att in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=15) as cli:
-                res = await cli.get(url)
-                res.raise_for_status()
-                soup = BeautifulSoup(res.text, "html.parser")
-                val  = soup.select_one("div.fs")
-                if val:
-                    txt = "".join(c for c in val.text if c.isdigit() or c in ",.")
-                    return float(txt.replace(",", "."))
+            async with httpx.AsyncClient(headers=HEADERS_FULL, timeout=15) as cli:
+                html_page = (await cli.get(url)).text
+            soup = BeautifulSoup(html_page, "html.parser")
+            fs_div = soup.find("div", class_="fs")
+            if fs_div:
+                return float("".join(ch for ch in fs_div.text if ch.isdigit() or ch in ",.").replace(",", "."))
         except Exception as e:
-            log.warning("BestChange sell attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
+            logger.warning("BestChange sell attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
+
 
 async def fetch_bestchange_buy() -> Optional[float]:
+    """USDT→RUB (крипта→наличные) – лучшая цена покупки с BestChange."""
     url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
-    for att in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=15) as cli:
-                res = await cli.get(url)
-                res.raise_for_status()
-                soup = BeautifulSoup(res.text, "html.parser")
-                row  = soup.select_one("table#content_table tr[onclick]")
-                td   = row.find_all("td", class_="bi")[1] if row else None
-                if td and "RUB Cash" in td.text:
-                    txt = "".join(c for c in td.text if c.isdigit() or c in ",.")
-                    return float(txt.replace(",", "."))
+            async with httpx.AsyncClient(headers=HEADERS_FULL, timeout=15) as cli:
+                html_page = (await cli.get(url)).text
+            soup = BeautifulSoup(html_page, "html.parser")
+            row = soup.select_one("table#content_table tr[onclick]")
+            td_price = next((td for td in row.find_all("td", class_="bi") if "RUB Cash" in td.text), None)
+            if td_price:
+                return float("".join(ch for ch in td_price.text if ch.isdigit() or ch in ",.").replace(",", "."))
         except Exception as e:
-            log.warning("BestChange buy attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
+            logger.warning("BestChange buy attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
-# ───────── EnergoTransBank parser ──────────
-HEADERS_FULL = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Referer": "https://ru.myfin.by/currency",
-    "DNT": "1",
-}
 
 async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """Возвращает (sell, buy, cbr) для USD/RUB из Энерготрансбанка."""
+    """Возвращает (sell, buy, cbr) для USD/RUB в отделении Энерготрансбанка Калининграда."""
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(
-                headers=HEADERS_FULL, follow_redirects=True, timeout=15
-            ) as cli:
+            async with httpx.AsyncClient(headers=HEADERS_FULL, follow_redirects=True, timeout=15) as cli:
                 resp = await cli.get(url)
                 resp.raise_for_status()
-
             soup = BeautifulSoup(resp.text, "html.parser")
-            row  = soup.select_one("table.table-best.white_bg tr:has(td.title)")
+            row = soup.select_one("table.table-best.white_bg tr:has(td.title)")
             if not row:
                 raise ValueError("USD row not found")
 
@@ -312,12 +314,11 @@ async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[flo
             return sell, buy, cbr
 
         except Exception as e:
-            # БЫЛО: logger.warning(...)
-            log.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+            logger.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-    # fallback: берём курс ЦБ РФ, если банк продолжает отдавать 403
+    # три провала подряд → пробуем хотя бы курс ЦБ
     try:
         js = (await httpx.AsyncClient(timeout=10)
               .get("https://www.cbr-xml-daily.ru/daily_json.js")).json()
@@ -325,6 +326,7 @@ async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[flo
         return None, None, cbr_only
     except Exception:
         return None, None, None
+
 
 # ──────────────── TELEGRAM BOT ──────────────────────
 def _auth_ok(uid: int) -> bool:
