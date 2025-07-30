@@ -276,23 +276,46 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
-async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+async def fetch_energo() -> tuple[Optional[float], Optional[float], Optional[float]]:
+    
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    for att in range(1, MAX_RETRIES + 1):
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru,en;q=0.9",
+    }
+
+    for a in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=15) as cli:
-                res = await cli.get(url)
+            async with httpx.AsyncClient(headers=headers, timeout=15) as c:
+                res = await c.get(url, follow_redirects=True)
+                if res.status_code == 403:  # иногда Cloudflare
+                    raise RuntimeError("HTTP 403")
                 res.raise_for_status()
-                soup = BeautifulSoup(res.text, "html.parser")
-                row  = soup.select_one("table.table-best.white_bg tr:has(td.title)")
-                if not row:
-                    raise ValueError("table row not found")
-                buy, sell, cbr = [float(td.text.replace(",", ".")) for td in row.find_all("td")[1:4]]
+
+                soup  = BeautifulSoup(res.text, "html.parser")
+                table = soup.find("table", class_="table-best")  # без white_bg на всякий случай
+                if not table:
+                    raise ValueError("rate table not found")
+
+                usd_row = next((tr for tr in table.select("tr") if "USD" in tr.text), None)
+                if not usd_row:
+                    raise ValueError("USD row not found")
+
+                tds = usd_row.find_all("td")
+                buy  = float(tds[1].text.replace(",", "."))
+                sell = float(tds[2].text.replace(",", "."))
+                cbr  = float(tds[3].text.replace(",", "."))
                 return sell, buy, cbr
+
         except Exception as e:
-            log.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
+            logger.warning("Energo attempt %s/%s: %s", a, MAX_RETRIES, e)
+            if a < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
+
+    # три неудачных прогона
     return None, None, None
 
 # ──────────────── TELEGRAM BOT ──────────────────────
@@ -346,22 +369,30 @@ async def send_rates_message(app):
     ts = datetime.now(KALININGRAD_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines = [ts, ""]
 
-    lines += ["KenigSwap USDT/RUB"]
+    # KenigSwap
+    lines.append("KenigSwap rate USDT/RUB")
     if gr_ask and gr_bid:
-        lines.append(f"Продажа: {gr_ask + KENIG_ASK_OFFSET:,.2f} ₽ | "
-                     f"Покупка: {gr_bid + KENIG_BID_OFFSET:,.2f} ₽")
+        lines.append(f"Продажа: {gr_ask + KENIG_ASK_OFFSET:.2f} ₽, "
+                     f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽")
     else:
         lines.append("— нет данных —")
     lines.append("")
 
-    lines += ["BestChange USDT/RUB"]
-    lines.append(f"Продажа: {bc_sell:,.2f} ₽ | Покупка: {bc_buy:,.2f} ₽"
-                 if bc_sell and bc_buy else "— нет данных —")
+    # BestChange
+    lines.append("BestChange rate USDT/RUB")
+    if bc_sell and bc_buy:
+        lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽")
+    else:
+        lines.append("— нет данных —")
     lines.append("")
 
-    lines += ["EnergoTransBank USD/RUB"]
-    lines.append(f"Продажа: {en_sell:,.2f} ₽ | Покупка: {en_buy:,.2f} ₽ | ЦБ: {en_cbr:,.2f} ₽"
-                 if en_sell and en_buy and en_cbr else "— нет данных —")
+    # EnergoTransBank
+    lines.append("EnergoTransBank rate USD/RUB")
+    if en_sell and en_buy and en_cbr:
+        lines.append(f"Продажа: {en_sell:.2f} ₽, "
+                     f"Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽")
+    else:
+        lines.append("— нет данных —")
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
 
@@ -375,7 +406,7 @@ async def send_rates_message(app):
     except Exception as e:
         log.error("Send error: %s", e)
 
-    # Supabase live-источники
+    # обновляем Supabase
     if gr_ask and gr_bid:
         await upsert_rate("kenig", gr_ask + KENIG_ASK_OFFSET, gr_bid + KENIG_BID_OFFSET)
     else:
