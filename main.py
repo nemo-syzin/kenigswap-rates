@@ -1,5 +1,5 @@
 # ────────────── main.py  ──────────────
-import asyncio, html, logging, os, subprocess
+import asyncio, html, logging, os, subprocess, sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, List
 
@@ -7,7 +7,7 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Error as PlaywrightError
 from supabase import create_client, Client
 from telegram.ext import ApplicationBuilder, CommandHandler
 
@@ -59,14 +59,22 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ──────── PLAYWRIGHT DL (первый старт) ────────
 def install_chromium() -> None:
+    """
+    Скачиваем Chromium, если он ещё не установлен.
+    Выполняется один раз при старте приложения.
+    """
     try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
         # сохраняем браузер рядом с проектом, а не в /root/.cache
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-        log.info("Playwright browser installed")
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+        subprocess.run(
+            ["playwright", "install", "--with-deps", "chromium"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+        log.info("Playwright browser installed / verified")
     except Exception as exc:
-        # FFMPEG может не скачаться – не критично
-        log.warning("Playwright install error: %s", exc)
+        log.warning("Playwright install error (игнорируем): %s", exc)
 
 # ──────── HELPERS ────────
 async def upsert_rate(source: str, sell: float, buy: float) -> None:
@@ -211,6 +219,12 @@ async def update_limits_dynamic() -> None:
 GRINEX_URL, TIMEOUT_MS = "https://grinex.io/trading/usdta7a5?lang=en", 60_000
 
 async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
+    """
+    Возвращает (ask, bid) или (None, None) при неудаче.
+    При отсутствии Chromium пытается скачать его 1 раз.
+    """
+    tried_install = False
+
     for att in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
@@ -227,10 +241,21 @@ async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
                 bid = float(await page.locator(bid_sel).first.get_attribute("data-price"))
                 await browser.close()
                 return ask, bid
+
+        except PlaywrightError as e:
+            if "Executable doesn't exist" in str(e) and not tried_install:
+                tried_install = True
+                log.warning("Chromium not found, installing...")
+                await asyncio.get_running_loop().run_in_executor(None, install_chromium)
+                continue  # повторим попытку
+            log.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
+
         except Exception as e:
             log.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
+
+        if att < MAX_RETRIES:
+            await asyncio.sleep(RETRY_DELAY)
+
     return None, None
 
 async def fetch_bestchange_sell() -> Optional[float]:
@@ -270,49 +295,47 @@ async def fetch_bestchange_buy() -> Optional[float]:
                 await asyncio.sleep(RETRY_DELAY)
     return None
 
-async def fetch_energo() -> tuple[float | None, float | None, float | None]:
+async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Курсы Энерготрансбанка (Калининград): buy / sell / ЦБ.
+    Возвращает (buy, sell, cbr) или (None, None, None) при неудаче.
+    """
+    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
 
-    url   = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
-    hdrs  = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-        ),
-        "Referer": "https://ru.myfin.by/currency",
-    }
-
-    async with httpx.AsyncClient(headers=hdrs, follow_redirects=True) as cli:
-        for att in range(1, MAX_RETRIES + 1):
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0"}
+    ) as client:
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                r = await cli.get(url, timeout=15)
-                r.raise_for_status()
+                resp = await client.get(url, timeout=15)
+                resp.raise_for_status()
 
-                soup  = BeautifulSoup(r.text, "html.parser")
+                soup = BeautifulSoup(resp.text, "html.parser")
                 table = soup.select_one("table.table-best.white_bg, table.table-best_white_bg")
-                if not table:
-                    raise RuntimeError("Таблица с курсами не найдена")
+                if table is None:
+                    raise ValueError("Курс-таблица не найдена")
 
                 row = next(
                     (
-                        tr for tr in table.select("tr")
-                        if tr.find("td") and
-                           re.search(r"(usd|доллар)", tr.find("td").get_text(strip=True), re.I)
+                        tr for tr in table.select("tbody > tr")
+                        if (td := tr.find("td", class_="title"))
+                        and any(x in td.get_text(strip=True).lower() for x in ("usd", "доллар"))
                     ),
-                    None,
+                    None
                 )
-                if not row:
-                    raise RuntimeError("Строка USD не найдена")
+                if row is None:
+                    raise ValueError("Строка USD не найдена")
 
-                tds  = row.find_all("td")
-                buy  = float(tds[1].get_text(strip=True).replace(",", "."))
-                sell = float(tds[2].get_text(strip=True).replace(",", "."))
-                cbr  = float(tds[3].get_text(strip=True).replace(",", "."))
+                cells = row.find_all("td")
+                buy  = float(cells[1].get_text(strip=True).replace(",", "."))
+                sell = float(cells[2].get_text(strip=True).replace(",", "."))
+                cbr  = float(cells[3].get_text(strip=True).replace(",", "."))
 
-                return sell, buy, cbr   # ← порядок, который ждёт основной код
+                return buy, sell, cbr
 
             except Exception as e:
-                log.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
-                if att < MAX_RETRIES:
+                log.warning("Energo attempt %s/%s: %s", attempt, MAX_RETRIES, e)
+                if attempt < MAX_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)
 
     return None, None, None
@@ -437,4 +460,8 @@ def main() -> None:
     APP.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    # Запуск из-под Uvicorn / Gunicorn?  Просто импортируйте main() в приложение.
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
