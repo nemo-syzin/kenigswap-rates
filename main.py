@@ -35,7 +35,7 @@ async def _fetch_bybit_basics() -> dict[str, float]:
     prices = {"USDT": 1.0}
     url     = "https://api.bybit.com/v5/market/tickers"
     params  = {"category": "spot"}          
-    proxy   = os.getenv("BYBIT_PROXY") or None
+    proxy   = os.getenv("BYBIT_PROXY")       
 
     async with httpx.AsyncClient(
         headers={
@@ -43,7 +43,7 @@ async def _fetch_bybit_basics() -> dict[str, float]:
             "Accept":     "application/json",
             "Referer":    "https://www.bybit.com/",
         },
-        proxies=proxies_cfg,
+        proxies=proxy,
         trust_env=False,
         timeout=10,
         follow_redirects=True,
