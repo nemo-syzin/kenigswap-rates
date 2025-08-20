@@ -1,7 +1,7 @@
 # ───────────────────── IMPORTS ──────────────────────
-import asyncio, contextlib, html, logging, os, subprocess
+import asyncio, contextlib, html, logging, os, subprocess, random, re
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,8 +18,8 @@ PASSWORD         = os.getenv("TG_BOT_PASS")
 CHAT_ID          = "@KaliningradCryptoRatesKenigSwap"
 KAL_TZ           = timezone(timedelta(hours=2))
 
-KENIG_ASK_OFFSET = 0.8   # +₽ к ask Grinex → KenigSwap
-KENIG_BID_OFFSET = -0.9  # –₽ к bid Grinex → KenigSwap
+KENIG_ASK_OFFSET = 0.8   # +₽ к ask → KenigSwap
+KENIG_BID_OFFSET = -0.9  # –₽ к bid → KenigSwap
 
 MAX_RETRIES      = 3
 RETRY_DELAY      = 5
@@ -44,43 +44,153 @@ def install_chromium() -> None:
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 60_000
 
-async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
+# ====== RAPIRA PARSER (новый) ===================================
+RAPIRA_RATES_URL = "https://api.rapira.net/open/market/rates"
+RAPIRA_OB_URL    = "https://api.rapira.net/market/exchange-plate-mini?symbol=USDT/RUB"
+
+def _backoff(attempt: int, base: float = 1.6, jitter: float = 0.6) -> float:
+    return (base ** (attempt - 1)) + random.uniform(0, jitter)
+
+async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     for att in range(1, MAX_RETRIES + 1):
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--proxy-server='direct://'",
-                        "--proxy-bypass-list=*",
-                    ],
-                )
-                ctx  = await browser.new_context(
-                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                "Chrome/123.0.0.0 Safari/537.36")
-                )
-                page = await ctx.new_page()
-                await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                with contextlib.suppress(Exception):
-                    await page.locator("button:text('Accept')").click(timeout=3_000)
-
-                ask_sel = "tbody.usdta7a5_ask.asks tr[data-price]"
-                bid_sel = "tbody.usdta7a5_bid.bids tr[data-price]"
-                await page.wait_for_selector(ask_sel, timeout=TIMEOUT_MS)
-                await page.wait_for_selector(bid_sel, timeout=TIMEOUT_MS)
-
-                ask = float(await page.locator(ask_sel).first.get_attribute("data-price"))
-                bid = float(await page.locator(bid_sel).first.get_attribute("data-price"))
-                await browser.close()
-                return ask, bid
+            async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as cli:
+                r = await cli.get(url)
+                r.raise_for_status()
+                return r.json()
         except Exception as e:
-            log.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
+            log.warning("Rapira GET %s attempt %s failed: %s", url, att, e)
             if att < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
+                await asyncio.sleep(_backoff(att))
+    return None
+
+def _first_number_from_level(level) -> Optional[float]:
+    """Уровень может быть [price, amount] или dict с ключом price."""
+    try:
+        if isinstance(level, (list, tuple)) and level:
+            return float(level[0])
+        if isinstance(level, dict) and "price" in level:
+            return float(level["price"])
+        return float(level)  # вдруг пришло число/строка
+    except Exception:
+        return None
+
+def _safe_float(val) -> Optional[float]:
+    try:
+        return float(val)
+    except Exception:
+        return None
+
+async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]:
+    """
+    Возвращает (ask, bid) для USDT/RUB:
+    - сперва из стакана exchange-plate-mini;
+    - фоллбек к open/market/rates.
+    """
+    # 1) Мини-стакан
+    data = await _rapira_get_json(RAPIRA_OB_URL)
+    if data:
+        container = data.get("data", data)
+        asks = container.get("asks")
+        bids = container.get("bids")
+        best_ask = _first_number_from_level(asks[0]) if isinstance(asks, list) and asks else None
+        best_bid = _first_number_from_level(bids[0]) if isinstance(bids, list) and bids else None
+        if best_ask is not None or best_bid is not None:
+            return best_ask, best_bid
+
+    # 2) Фоллбек — общий список курсов
+    rates = await _rapira_get_json(RAPIRA_RATES_URL)
+    items = None
+    if isinstance(rates, dict):
+        items = rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items")
+    elif isinstance(rates, list):
+        items = rates
+
+    if isinstance(items, list):
+        target = None
+        for it in items:
+            sym = (it.get("symbol") or it.get("pair") or it.get("name") or "").upper().replace("_", "/")
+            if sym == "USDT/RUB":
+                target = it
+                break
+        if target:
+            ask = _safe_float(target.get("ask") or target.get("offer") or target.get("askPrice") or target.get("sell"))
+            bid = _safe_float(target.get("bid") or target.get("bidPrice") or target.get("buy"))
+            return ask, bid
+
     return None, None
 
+async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Словарь по всем парам:
+      {"USDT/RUB": {"ask": 123.45, "bid": 122.90, "last": 123.10}, ...}
+    """
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    rates = await _rapira_get_json(RAPIRA_RATES_URL)
+    if not rates:
+        return out
+
+    items = None
+    if isinstance(rates, dict):
+        items = rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items")
+    elif isinstance(rates, list):
+        items = rates
+
+    if not isinstance(items, list):
+        return out
+
+    for it in items:
+        sym = (it.get("symbol") or it.get("pair") or it.get("name") or "").upper().replace("_", "/")
+        if not sym:
+            continue
+        ask = _safe_float(it.get("ask") or it.get("offer") or it.get("askPrice") or it.get("sell"))
+        bid = _safe_float(it.get("bid") or it.get("bidPrice") or it.get("buy"))
+        last = _safe_float(it.get("last") or it.get("price") or it.get("close"))
+        out[sym] = {"ask": ask, "bid": bid, "last": last}
+    return out
+# ====================================================
+
+# ====== GRINEX PARSER (оставлен, но ЗАКОММЕНТИРОВАН) ===========
+# async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
+#     for att in range(1, MAX_RETRIES + 1):
+#         try:
+#             async with async_playwright() as p:
+#                 browser = await p.chromium.launch(
+#                     headless=True,
+#                     args=[
+#                         "--disable-blink-features=AutomationControlled",
+#                         "--proxy-server='direct://'",
+#                         "--proxy-bypass-list=*",
+#                     ],
+#                 )
+#                 ctx  = await browser.new_context(
+#                     user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+#                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+#                                 "Chrome/123.0.0.0 Safari/537.36")
+#                 )
+#                 page = await ctx.new_page()
+#                 await page.goto(GRINEX_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+#                 with contextlib.suppress(Exception):
+#                     await page.locator("button:text('Accept')").click(timeout=3_000)
+#
+#                 ask_sel = "tbody.usdta7a5_ask.asks tr[data-price]"
+#                 bid_sel = "tbody.usdta7a5_bid.bids tr[data-price]"
+#                 await page.wait_for_selector(ask_sel, timeout=TIMEOUT_MS)
+#                 await page.wait_for_selector(bid_sel, timeout=TIMEOUT_MS)
+#
+#                 ask = float(await page.locator(ask_sel).first.get_attribute("data-price"))
+#                 bid = float(await page.locator(bid_sel).first.get_attribute("data-price"))
+#                 await browser.close()
+#                 return ask, bid
+#         except Exception as e:
+#             log.warning("Grinex attempt %s/%s failed: %s", att, MAX_RETRIES, e)
+#             if att < MAX_RETRIES:
+#                 await asyncio.sleep(RETRY_DELAY)
+#     return None, None
+# ===============================================================
+
+# ────────────── ПРОЧИЕ СКРАПЕРЫ (как были) ────────────────────
 async def fetch_bestchange_sell() -> Optional[float]:
     url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
     for att in range(1, MAX_RETRIES + 1):
@@ -176,17 +286,19 @@ async def cmd_show(u, _):
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
+    # Rapira вместо Grinex
+    gr_ask, gr_bid = await fetch_rapira_usdtrub_best()
+
     bc_sell = await fetch_bestchange_sell()
     bc_buy  = await fetch_bestchange_buy()
     en_sell, en_buy, en_cbr = await fetch_energo()
-    gr_ask, gr_bid = await fetch_grinex_rate()
 
     ts = datetime.now(KAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines = [ts, ""]
 
-    # KenigSwap (Grinex + оффсеты)
+    # KenigSwap (Rapira + оффсеты)
     lines += ["KenigSwap rate USDT/RUB"]
-    if gr_ask and gr_bid:
+    if gr_ask is not None and gr_bid is not None:
         lines.append(f"Продажа: {gr_ask + KENIG_ASK_OFFSET:.2f} ₽, "
                      f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽")
     else:
@@ -195,15 +307,19 @@ async def send_rates_message(app):
 
     # BestChange
     lines += ["BestChange rate USDT/RUB"]
-    lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽"
-                 if bc_sell and bc_buy else "— нет данных —")
+    if bc_sell is not None and bc_buy is not None:
+        lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽")
+    else:
+        lines.append("— нет данных —")
     lines.append("")
 
     # EnergoTransBank
     lines += ["EnergoTransBank rate USD/RUB"]
-    lines.append(f"Продажа: {en_sell:.2f} ₽, "
-                 f"Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽"
-                 if en_sell and en_buy and en_cbr else "— нет данных —")
+    if en_sell is not None and en_buy is not None and en_cbr is not None:
+        lines.append(f"Продажа: {en_sell:.2f} ₽, "
+                     f"Покупка: {en_buy:.2f} ₽, ЦБ: {en_cbr:.2f} ₽")
+    else:
+        lines.append("— нет данных —")
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
     try:
