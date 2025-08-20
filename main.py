@@ -1,5 +1,5 @@
 # ───────────────────── IMPORTS ──────────────────────
-import asyncio, contextlib, html, logging, os, subprocess, random, re
+import asyncio, contextlib, html, logging, os, subprocess, random
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any
 
@@ -15,7 +15,7 @@ load_dotenv()
 # ───────────────────── CONFIG ───────────────────────
 TOKEN            = os.getenv("TG_BOT_TOKEN")
 PASSWORD         = os.getenv("TG_BOT_PASS")
-CHAT_ID          = os.getenv("TG_CHAT_ID", "@KaliningradCryptoRatesKenigSwap")  # можно переопределить в .env
+CHAT_ID          = os.getenv("TG_CHAT_ID", "@KaliningradCryptoRatesKenigSwap")
 KAL_TZ           = timezone(timedelta(hours=2))
 
 KENIG_ASK_OFFSET = 0.8   # +₽ к ask → KenigSwap
@@ -27,6 +27,9 @@ AUTHORIZED_USERS: set[int] = set()
 
 # Rapira прокси (опционально): http://user:pass@host:port или socks5://host:port
 RAPIRA_PROXY     = os.getenv("RAPIRA_PROXY")
+
+# Показывать ли «Источник/Обновлено» (по умолчанию — нет)
+SHOW_RAPIRA_META = False
 
 # ───────────────────── LOGGER ───────────────────────
 logging.basicConfig(
@@ -47,7 +50,7 @@ def install_chromium() -> None:
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 60_000
 
-# ====== RAPIRA PARSER (новый, с 451/прокси/кэшом) ==========================
+# ====== RAPIRA PARSER (с 451/прокси/кэшем) ==========================
 RAPIRA_RATES_URL = "https://api.rapira.net/open/market/rates"
 RAPIRA_OB_URL    = "https://api.rapira.net/market/exchange-plate-mini?symbol=USDT/RUB"
 
@@ -75,7 +78,6 @@ async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str
             ) as cli:
                 r = await cli.get(url)
                 if r.status_code == 451:
-                    # Юрисдикционная/гео-блокировка — выходим сразу
                     raise RapiraBlockedError("HTTP 451 (geo/IP blocked)")
                 r.raise_for_status()
                 return r.json()
@@ -89,13 +91,13 @@ async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str
     return None
 
 def _first_number_from_level(level) -> Optional[float]:
-    """Уровень может быть [price, amount] или dict с ключом price."""
+    """Уровень может быть [price, amount] или dict с ключом price, либо число/строка."""
     try:
         if isinstance(level, (list, tuple)) and level:
             return float(level[0])
         if isinstance(level, dict) and "price" in level:
             return float(level["price"])
-        return float(level)  # вдруг пришло число/строка
+        return float(level)
     except Exception:
         return None
 
@@ -146,10 +148,10 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
                 return ask, bid
 
         _last_rapira_status = "error"
-        return _last_rapira_usdtrub  # вернём последнюю удачную, если была
+        return _last_rapira_usdtrub
     except RapiraBlockedError:
         _last_rapira_status = "blocked"
-        return _last_rapira_usdtrub  # вернём кэш, чтобы не «пусто»
+        return _last_rapira_usdtrub
 
 async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
     """
@@ -160,7 +162,6 @@ async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
     try:
         rates = await _rapira_get_json(RAPIRA_RATES_URL)
     except RapiraBlockedError:
-        # Если заблокировано, вернуть то, что есть (скорее всего пусто)
         return out
 
     if not rates:
@@ -338,17 +339,17 @@ async def send_rates_message(app):
                      f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽")
     else:
         lines.append("— нет данных —")
-
-    # пометка источника Rapira
-    src_note = {
-        "ok": "Rapira (orderbook)",
-        "fallback": "Rapira (rates)",
-        "blocked": "Rapira: 451 blocked — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: 451 blocked",
-        "error": "Rapira: нет данных — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: нет данных",
-    }.get(_last_rapira_status, "Rapira")
-    lines.append(f"Источник: {src_note}")
-    if _last_rapira_ts:
-        lines.append(f"Обновлено: {_last_rapira_ts.strftime('%d.%m.%Y %H:%M:%S')}")
+    # Метаданные Rapira скрыты по умолчанию
+    if SHOW_RAPIRA_META:
+        src_note = {
+            "ok": "Rapira (orderbook)",
+            "fallback": "Rapira (rates)",
+            "blocked": "Rapira: 451 blocked — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: 451 blocked",
+            "error": "Rapira: нет данных — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: нет данных",
+        }.get(_last_rapira_status, "Rapira")
+        lines.append(f"Источник: {src_note}")
+        if _last_rapira_ts:
+            lines.append(f"Обновлено: {_last_rapira_ts.strftime('%d.%m.%Y %H:%M:%S')}")
     lines.append("")
 
     # BestChange
