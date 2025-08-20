@@ -15,7 +15,7 @@ load_dotenv()
 # ───────────────────── CONFIG ───────────────────────
 TOKEN            = os.getenv("TG_BOT_TOKEN")
 PASSWORD         = os.getenv("TG_BOT_PASS")
-CHAT_ID          = "@KaliningradCryptoRatesKenigSwap"
+CHAT_ID          = os.getenv("TG_CHAT_ID", "@KaliningradCryptoRatesKenigSwap")  # можно переопределить в .env
 KAL_TZ           = timezone(timedelta(hours=2))
 
 KENIG_ASK_OFFSET = 0.8   # +₽ к ask → KenigSwap
@@ -24,6 +24,9 @@ KENIG_BID_OFFSET = -0.9  # –₽ к bid → KenigSwap
 MAX_RETRIES      = 3
 RETRY_DELAY      = 5
 AUTHORIZED_USERS: set[int] = set()
+
+# Rapira прокси (опционально): http://user:pass@host:port или socks5://host:port
+RAPIRA_PROXY     = os.getenv("RAPIRA_PROXY")
 
 # ───────────────────── LOGGER ───────────────────────
 logging.basicConfig(
@@ -44,21 +47,41 @@ def install_chromium() -> None:
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
 TIMEOUT_MS = 60_000
 
-# ====== RAPIRA PARSER (новый) ===================================
+# ====== RAPIRA PARSER (новый, с 451/прокси/кэшом) ==========================
 RAPIRA_RATES_URL = "https://api.rapira.net/open/market/rates"
 RAPIRA_OB_URL    = "https://api.rapira.net/market/exchange-plate-mini?symbol=USDT/RUB"
+
+# Глобальный кэш последних удачных USDT/RUB (ask, bid)
+_last_rapira_usdtrub: Tuple[Optional[float], Optional[float]] = (None, None)
+_last_rapira_ts: Optional[datetime] = None
+_last_rapira_status: str = ""  # 'ok' | 'fallback' | 'blocked' | 'error'
 
 def _backoff(attempt: int, base: float = 1.6, jitter: float = 0.6) -> float:
     return (base ** (attempt - 1)) + random.uniform(0, jitter)
 
+class RapiraBlockedError(Exception):
+    """HTTP 451: гео/IP-блок — не ретраим бессмысленно."""
+
 async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    proxies = None
+    if RAPIRA_PROXY:
+        proxies = {"http://": RAPIRA_PROXY, "https://": RAPIRA_PROXY}
+
     for att in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as cli:
+            async with httpx.AsyncClient(
+                headers=headers, timeout=timeout, follow_redirects=True, proxies=proxies
+            ) as cli:
                 r = await cli.get(url)
+                if r.status_code == 451:
+                    # Юрисдикционная/гео-блокировка — выходим сразу
+                    raise RapiraBlockedError("HTTP 451 (geo/IP blocked)")
                 r.raise_for_status()
                 return r.json()
+        except RapiraBlockedError:
+            log.warning("Rapira blocked (451) at %s", url)
+            raise
         except Exception as e:
             log.warning("Rapira GET %s attempt %s failed: %s", url, att, e)
             if att < MAX_RETRIES:
@@ -85,41 +108,48 @@ def _safe_float(val) -> Optional[float]:
 async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]:
     """
     Возвращает (ask, bid) для USDT/RUB:
-    - сперва из стакана exchange-plate-mini;
-    - фоллбек к open/market/rates.
+    - сперва из мини-стакана exchange-plate-mini;
+    - фоллбек к open/market/rates;
+    - при 451 возвращает кэш, если есть.
     """
-    # 1) Мини-стакан
-    data = await _rapira_get_json(RAPIRA_OB_URL)
-    if data:
-        container = data.get("data", data)
-        asks = container.get("asks")
-        bids = container.get("bids")
-        best_ask = _first_number_from_level(asks[0]) if isinstance(asks, list) and asks else None
-        best_bid = _first_number_from_level(bids[0]) if isinstance(bids, list) and bids else None
-        if best_ask is not None or best_bid is not None:
-            return best_ask, best_bid
+    global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status
 
-    # 2) Фоллбек — общий список курсов
-    rates = await _rapira_get_json(RAPIRA_RATES_URL)
-    items = None
-    if isinstance(rates, dict):
-        items = rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items")
-    elif isinstance(rates, list):
-        items = rates
+    try:
+        # 1) Мини-стакан
+        data = await _rapira_get_json(RAPIRA_OB_URL)
+        if data:
+            container = data.get("data", data)
+            asks = container.get("asks")
+            bids = container.get("bids")
+            best_ask = _first_number_from_level(asks[0]) if isinstance(asks, list) and asks else None
+            best_bid = _first_number_from_level(bids[0]) if isinstance(bids, list) and bids else None
+            if best_ask is not None or best_bid is not None:
+                _last_rapira_usdtrub = (best_ask, best_bid)
+                _last_rapira_ts = datetime.now(KAL_TZ)
+                _last_rapira_status = "ok"
+                return best_ask, best_bid
 
-    if isinstance(items, list):
-        target = None
-        for it in items:
-            sym = (it.get("symbol") or it.get("pair") or it.get("name") or "").upper().replace("_", "/")
-            if sym == "USDT/RUB":
-                target = it
-                break
-        if target:
-            ask = _safe_float(target.get("ask") or target.get("offer") or target.get("askPrice") or target.get("sell"))
-            bid = _safe_float(target.get("bid") or target.get("bidPrice") or target.get("buy"))
-            return ask, bid
+        # 2) Фоллбек — общий список курсов
+        rates = await _rapira_get_json(RAPIRA_RATES_URL)
+        items = (rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items")) if isinstance(rates, dict) else rates
+        if isinstance(items, list):
+            target = next(
+                (it for it in items if (it.get("symbol") or it.get("pair") or it.get("name") or "").upper().replace("_","/") == "USDT/RUB"),
+                None
+            )
+            if target:
+                ask = _safe_float(target.get("ask") or target.get("offer") or target.get("askPrice") or target.get("sell"))
+                bid = _safe_float(target.get("bid") or target.get("bidPrice") or target.get("buy"))
+                _last_rapira_usdtrub = (ask, bid)
+                _last_rapira_ts = datetime.now(KAL_TZ)
+                _last_rapira_status = "fallback"
+                return ask, bid
 
-    return None, None
+        _last_rapira_status = "error"
+        return _last_rapira_usdtrub  # вернём последнюю удачную, если была
+    except RapiraBlockedError:
+        _last_rapira_status = "blocked"
+        return _last_rapira_usdtrub  # вернём кэш, чтобы не «пусто»
 
 async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
     """
@@ -127,7 +157,12 @@ async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
       {"USDT/RUB": {"ask": 123.45, "bid": 122.90, "last": 123.10}, ...}
     """
     out: Dict[str, Dict[str, Optional[float]]] = {}
-    rates = await _rapira_get_json(RAPIRA_RATES_URL)
+    try:
+        rates = await _rapira_get_json(RAPIRA_RATES_URL)
+    except RapiraBlockedError:
+        # Если заблокировано, вернуть то, что есть (скорее всего пусто)
+        return out
+
     if not rates:
         return out
 
@@ -149,9 +184,9 @@ async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
         last = _safe_float(it.get("last") or it.get("price") or it.get("close"))
         out[sym] = {"ask": ask, "bid": bid, "last": last}
     return out
-# ====================================================
+# ===========================================================================
 
-# ====== GRINEX PARSER (оставлен, но ЗАКОММЕНТИРОВАН) ===========
+# ====== GRINEX PARSER (оставлен, но ЗАКОММЕНТИРОВАН) =======================
 # async def fetch_grinex_rate() -> Tuple[Optional[float], Optional[float]]:
 #     for att in range(1, MAX_RETRIES + 1):
 #         try:
@@ -188,7 +223,7 @@ async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
 #             if att < MAX_RETRIES:
 #                 await asyncio.sleep(RETRY_DELAY)
 #     return None, None
-# ===============================================================
+# ===========================================================================
 
 # ────────────── ПРОЧИЕ СКРАПЕРЫ (как были) ────────────────────
 async def fetch_bestchange_sell() -> Optional[float]:
@@ -303,6 +338,17 @@ async def send_rates_message(app):
                      f"Покупка: {gr_bid + KENIG_BID_OFFSET:.2f} ₽")
     else:
         lines.append("— нет данных —")
+
+    # пометка источника Rapira
+    src_note = {
+        "ok": "Rapira (orderbook)",
+        "fallback": "Rapira (rates)",
+        "blocked": "Rapira: 451 blocked — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: 451 blocked",
+        "error": "Rapira: нет данных — показаны последние значения" if _last_rapira_usdtrub != (None, None) else "Rapira: нет данных",
+    }.get(_last_rapira_status, "Rapira")
+    lines.append(f"Источник: {src_note}")
+    if _last_rapira_ts:
+        lines.append(f"Обновлено: {_last_rapira_ts.strftime('%d.%m.%Y %H:%M:%S')}")
     lines.append("")
 
     # BestChange
@@ -334,7 +380,7 @@ async def send_rates_message(app):
 
 # ───────────────────── MAIN ─────────────────────────
 def main() -> None:
-    install_chromium()
+    install_chromium()  # не обязателен для Rapira, но пусть остаётся
 
     global APP
     APP = ApplicationBuilder().token(TOKEN).build()
