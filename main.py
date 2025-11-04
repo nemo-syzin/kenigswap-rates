@@ -108,12 +108,7 @@ def _safe_float(val) -> Optional[float]:
         return None
 
 async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]:
-    """
-    Возвращает (ask, bid) для USDT/RUB:
-    - сперва из мини-стакана exchange-plate-mini;
-    - фоллбек к open/market/rates;
-    - при 451 возвращает кэш, если есть.
-    """
+
     global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status
 
     try:
@@ -148,16 +143,15 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
                 return ask, bid
 
         _last_rapira_status = "error"
+        _last_rapira_usdtrub = (None, None)
         return _last_rapira_usdtrub
     except RapiraBlockedError:
         _last_rapira_status = "blocked"
+        _last_rapira_usdtrub = (None, None)
         return _last_rapira_usdtrub
 
 async def fetch_rapira_rates_all() -> Dict[str, Dict[str, Optional[float]]]:
-    """
-    Словарь по всем парам:
-      {"USDT/RUB": {"ask": 123.45, "bid": 122.90, "last": 123.10}, ...}
-    """
+
     out: Dict[str, Dict[str, Optional[float]]] = {}
     try:
         rates = await _rapira_get_json(RAPIRA_RATES_URL)
@@ -265,7 +259,7 @@ async def fetch_bestchange_buy() -> Optional[float]:
     return None
 
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
+    url = "https://ru.myfin.by/bank/energotрансбанк/currency/kaliningrad"
     for att in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=15) as cli:
