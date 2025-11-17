@@ -18,16 +18,14 @@ PASSWORD         = os.getenv("TG_BOT_PASS")
 CHAT_ID          = os.getenv("TG_CHAT_ID", "@KaliningradCryptoRatesKenigSwap")
 KAL_TZ           = timezone(timedelta(hours=2))
 
-KENIG_ASK_OFFSET = 0.8   # +₽ к ask → KenigSwap
-KENIG_BID_OFFSET = -0.9  # –₽ к bid → KenigSwap
+KENIG_ASK_OFFSET = 0.8
+KENIG_BID_OFFSET = -0.9
 
 MAX_RETRIES      = 3
 RETRY_DELAY      = 5
 AUTHORIZED_USERS: set[int] = set()
 
-# Rapira прокси (опционально)
 RAPIRA_PROXY     = os.getenv("RAPIRA_PROXY")
-
 SHOW_RAPIRA_META = False
 
 # ───────────────────── LOGGER ───────────────────────
@@ -43,7 +41,7 @@ def install_chromium() -> None:
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
     except Exception as exc:
-        log.warning("Playwright install error (игнорируем): %s", exc)
+        log.warning("Playwright install error (ignored): %s", exc)
 
 # ───────────────────── SCRAPERS ─────────────────────
 GRINEX_URL = "https://grinex.io/trading/usdta7a5?lang=en"
@@ -106,7 +104,6 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
     global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status
 
     try:
-        # 1) Mini orderbook
         data = await _rapira_get_json(RAPIRA_OB_URL)
         if data:
             container = data.get("data", data)
@@ -120,10 +117,11 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
                 _last_rapira_status = "ok"
                 return best_ask, best_bid
 
-        # 2) Fallback — rates
         rates = await _rapira_get_json(RAPIRA_RATES_URL)
-        items = (rates.get("data") or rates.get("rates")
-                 or rates.get("result") or rates.get("items")
+        items = (rates.get("data") or 
+                 rates.get("rates") or 
+                 rates.get("result") or 
+                 rates.get("items")
                  if isinstance(rates, dict) else rates)
 
         if isinstance(items, list):
@@ -150,43 +148,13 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
         _last_rapira_status = "blocked"
         return (None, None)
 
-# ========= BESTCHANGE ============================================
-async def fetch_bestchange_sell() -> Optional[float]:
-    url = "https://www.bestchange.com/cash-ruble-to-tether-trc20-in-klng.html"
-    for att in range(1, MAX_RETRIES + 1):
-        try:
-            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=15) as cli:
-                r = await cli.get(url)
-                r.raise_for_status()
-                soup = BeautifulSoup(r.text, "html.parser")
-                val  = soup.select_one("div.fs")
-                if val:
-                    txt = "".join(c for c in val.text if c.isdigit() or c in ",.")
-                    return float(txt.replace(",", "."))
-        except Exception as e:
-            log.warning("BestChange sell attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
-    return None
-
-async def fetch_bestchange_buy() -> Optional[float]:
-    url = "https://www.bestchange.com/tether-trc20-to-cash-ruble-in-klng.html"
-    for att in range(1, MAX_RETRIES + 1):
-        try:
-            async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=15) as cli:
-                r = await cli.get(url)
-                r.raise_for_status()
-                soup  = BeautifulSoup(r.text, "html.parser")
-                row   = soup.select_one("table#content_table tr[onclick]")
-                td    = row.find_all("td", class_="bi")[1] if row else None
-                if td and "RUB Cash" in td.text:
-                    txt = "".join(c for c in td.text if c.isdigit() or c in ",.")
-                    return float(txt.replace(",", "."))
-        except Exception as e:
-            log.warning("BestChange buy attempt %s/%s: %s", att, MAX_RETRIES, e)
-            if att < MAX_RETRIES:
-                await asyncio.sleep(RETRY_DELAY)
-    return None
+# ============= BESTCHANGE (ОТКЛЮЧЕНО) ============================
+# async def fetch_bestchange_sell() -> Optional[float]:
+#     ...
+#
+# async def fetch_bestchange_buy() -> Optional[float]:
+#     ...
+# =================================================================
 
 # ============= ENERGOTRANSBANK (исправленный URL) ==================
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -259,10 +227,12 @@ async def cmd_show(u, _):
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
+
     gr_ask, gr_bid = await fetch_rapira_usdtrub_best()
 
-    bc_sell = await fetch_bestchange_sell()
-    bc_buy  = await fetch_bestchange_buy()
+    # BestChange отключён
+    # bc_sell = await fetch_bestchange_sell()
+    # bc_buy  = await fetch_bestchange_buy()
 
     en_sell, en_buy, en_cbr = await fetch_energo()
 
@@ -281,14 +251,13 @@ async def send_rates_message(app):
 
     lines.append("")
 
-    # BestChange
-    lines += ["BestChange rate USDT/RUB"]
-    if bc_sell is not None and bc_buy is not None:
-        lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽")
-    else:
-        lines.append("— нет данных —")
-
-    lines.append("")
+    # BestChange отключён
+    # lines += ["BestChange rate USDT/RUB"]
+    # if bc_sell is not None and bc_buy is not None:
+    #     lines.append(f"Продажа: {bc_sell:.2f} ₽, Покупка: {bc_buy:.2f} ₽")
+    # else:
+    #     lines.append("— нет данных —")
+    # lines.append("")
 
     # Energo
     lines += ["EnergoTransBank rate USD/RUB"]
