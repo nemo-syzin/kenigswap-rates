@@ -28,7 +28,6 @@ KENIG_BID_OFFSET = -0.9  # на покупку (bid)
 
 MAX_RETRIES      = 3
 RETRY_DELAY      = 5
-
 AUTHORIZED_USERS: set[int] = set()
 
 RAPIRA_PROXY     = os.getenv("RAPIRA_PROXY")
@@ -46,10 +45,6 @@ log = logging.getLogger(__name__)
 
 # ────────────────── PLAYWRIGHT CHROMIUM ─────────────
 def install_chromium() -> None:
-    """
-    Оставлено как в вашем скрипте: на сервере (Render) пригодится,
-    даже если сейчас парсеров на playwright нет.
-    """
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
     except Exception as exc:
@@ -167,8 +162,8 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
 # ============= ENERGOTRANSBANK ==================
 async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Парсит myfin: обычно колонки идут Покупка, Продажа, ЦБ.
-    Возвращаем (sell, buy, cbr) как у вас было.
+    На странице обычно: Покупка, Продажа, ЦБ.
+    Возвращаем (sell, buy, cbr) — как у вас было.
     """
     url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
 
@@ -227,9 +222,7 @@ async def cmd_change(u, ctx):
     try:
         global KENIG_ASK_OFFSET, KENIG_BID_OFFSET
         KENIG_ASK_OFFSET, KENIG_BID_OFFSET = map(float, ctx.args[:2])
-        await u.message.reply_text(
-            f"Новые оффсеты: ask +{KENIG_ASK_OFFSET}  bid {KENIG_BID_OFFSET}"
-        )
+        await u.message.reply_text(f"Новые оффсеты: ask +{KENIG_ASK_OFFSET}  bid {KENIG_BID_OFFSET}")
     except Exception:
         await u.message.reply_text("Пример: /change 1.0 -0.5")
 
@@ -238,24 +231,21 @@ async def cmd_show(u, _):
         return await u.message.reply_text("Нет доступа.")
     await u.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}")
 
-# ────────────── PREMIUM ONE-LINE FORMAT ──────────────
-# Подберите ширины под ваш чат (если будут переносы строк на мобиле — уменьшайте).
-LEFT_W   = 32  # ширина левой части "Источник · Пара"
-LABEL_W  = 9   # "Покупка:" / "Продажа:" (8) + запас
-VALUE_W  = 7   # ширина числа (включая пробелы слева)
-GAP      = "   "  # разделитель между полями
+# ────────────── INLINE (LIKE BEFORE) BUT ALIGNED ──────────────
+# Формат: как на вашем скрине (заголовок + одна строка), но с нормальным выравниванием.
+NUM_W = 6   # ширина числа (80.72 -> 5, но берём запас)
+SEG_W = 20  # ширина "сегмента" (Покупка/Продажа/ЦБ) чтобы ровно было
 
-def _field(label: str, value: Optional[float], suffix: str = "₽") -> str:
-    """
-    Возвращает фиксированной ширины поле вида:
-    "Покупка:  78.00 ₽"
-    """
-    val_str = "—" if value is None else f"{value:.2f}"
-    return f"{label.ljust(LABEL_W)}{val_str.rjust(VALUE_W)} {suffix}"
+def _seg(lbl: str, val: Optional[float], unit: str = "₽", comma: bool = True) -> str:
+    n = "—" if val is None else f"{val:.2f}"
+    s = f"{lbl}: {n.rjust(NUM_W)} {unit}"
+    if comma:
+        s += ","
+    return s.ljust(SEG_W)
 
-def _one_line(title: str, pair: str, fields: List[str]) -> str:
-    left = f"{title} · {pair}"
-    return left.ljust(LEFT_W) + GAP + GAP.join(fields)
+def _inline_line(segments: List[str]) -> str:
+    # Склеиваем и убираем хвостовые пробелы
+    return "".join(segments).rstrip()
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
@@ -265,49 +255,29 @@ async def send_rates_message(app):
     ts = datetime.now(KAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines: List[str] = [ts, ""]
 
-    # KenigSwap USDT/RUB (Покупка -> Продажа)
+    # KenigSwap
+    lines.append("KenigSwap rate USDT/RUB")
     if gr_ask is not None and gr_bid is not None:
         kenig_sell = gr_ask + KENIG_ASK_OFFSET  # продажа
         kenig_buy  = gr_bid + KENIG_BID_OFFSET  # покупка
-        lines.append(_one_line(
-            "KenigSwap",
-            "USDT/RUB",
-            [
-                _field("Покупка:", kenig_buy, "₽"),
-                _field("Продажа:", kenig_sell, "₽"),
-            ],
-        ))
+        lines.append(_inline_line([
+            _seg("Покупка", kenig_buy,  "₽", comma=True),
+            _seg("Продажа", kenig_sell, "₽", comma=False),
+        ]))
     else:
-        lines.append(_one_line(
-            "KenigSwap",
-            "USDT/RUB",
-            [
-                _field("Покупка:", None, "₽"),
-                _field("Продажа:", None, "₽"),
-            ],
-        ))
+        lines.append("— нет данных —")
 
-    # EnergoTransBank USD/RUB (Покупка -> Продажа -> ЦБ)
+    lines.append("")
+    # EnergoTransBank
+    lines.append("EnergoTransBank rate USD/RUB")
     if en_sell is not None and en_buy is not None and en_cbr is not None:
-        lines.append(_one_line(
-            "EnergoTransBank",
-            "USD/RUB",
-            [
-                _field("Покупка:", en_buy,  "₽"),
-                _field("Продажа:", en_sell, "₽"),
-                _field("ЦБ:",      en_cbr,  "₽"),
-            ],
-        ))
+        lines.append(_inline_line([
+            _seg("Покупка", en_buy,  "₽", comma=True),
+            _seg("Продажа", en_sell, "₽", comma=True),
+            _seg("ЦБ",      en_cbr,  "₽", comma=False),
+        ]))
     else:
-        lines.append(_one_line(
-            "EnergoTransBank",
-            "USD/RUB",
-            [
-                _field("Покупка:", None, "₽"),
-                _field("Продажа:", None, "₽"),
-                _field("ЦБ:",      None, "₽"),
-            ],
-        ))
+        lines.append("— нет данных —")
 
     if SHOW_RAPIRA_META:
         lines += ["", f"Rapira status: {_last_rapira_status}"]
@@ -333,7 +303,6 @@ def main() -> None:
         raise RuntimeError("TG_BOT_TOKEN is not set")
 
     APP = ApplicationBuilder().token(TOKEN).build()
-
     APP.add_handler(CommandHandler("start", cmd_start))
     APP.add_handler(CommandHandler("help", cmd_help))
     APP.add_handler(CommandHandler("auth", cmd_auth))
