@@ -238,24 +238,24 @@ async def cmd_show(u, _):
         return await u.message.reply_text("Нет доступа.")
     await u.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}")
 
-# ────────────── MESSAGE FORMATTER ───────────────────
-def _fmt_rate_block(title: str, rows: List[Tuple[str, Optional[float], str]]) -> List[str]:
-    """
-    Делает табличный вид в <pre>: выравнивание по ширине ярлыков и чисел.
-    rows: [(label, value, suffix)], например ("Покупка", 78.0, "₽")
-    """
-    label_w = max(len(lbl) for lbl, _, _ in rows)
+# ────────────── PREMIUM ONE-LINE FORMAT ──────────────
+# Подберите ширины под ваш чат (если будут переносы строк на мобиле — уменьшайте).
+LEFT_W   = 32  # ширина левой части "Источник · Пара"
+LABEL_W  = 9   # "Покупка:" / "Продажа:" (8) + запас
+VALUE_W  = 7   # ширина числа (включая пробелы слева)
+GAP      = "   "  # разделитель между полями
 
-    vals = [f"{v:.2f}" for _, v, _ in rows if v is not None]
-    value_w = max((len(s) for s in vals), default=1)
+def _field(label: str, value: Optional[float], suffix: str = "₽") -> str:
+    """
+    Возвращает фиксированной ширины поле вида:
+    "Покупка:  78.00 ₽"
+    """
+    val_str = "—" if value is None else f"{value:.2f}"
+    return f"{label.ljust(LABEL_W)}{val_str.rjust(VALUE_W)} {suffix}"
 
-    out = [title]
-    for lbl, v, suf in rows:
-        if v is None:
-            out.append(f"{lbl.ljust(label_w)}: {'—'.rjust(value_w)} {suf}".rstrip())
-        else:
-            out.append(f"{lbl.ljust(label_w)}: {f'{v:.2f}'.rjust(value_w)} {suf}".rstrip())
-    return out
+def _one_line(title: str, pair: str, fields: List[str]) -> str:
+    left = f"{title} · {pair}"
+    return left.ljust(LEFT_W) + GAP + GAP.join(fields)
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
@@ -265,37 +265,50 @@ async def send_rates_message(app):
     ts = datetime.now(KAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines: List[str] = [ts, ""]
 
-    # KenigSwap (Покупка -> Продажа)
+    # KenigSwap USDT/RUB (Покупка -> Продажа)
     if gr_ask is not None and gr_bid is not None:
         kenig_sell = gr_ask + KENIG_ASK_OFFSET  # продажа
         kenig_buy  = gr_bid + KENIG_BID_OFFSET  # покупка
-
-        lines += _fmt_rate_block(
-            "KenigSwap rate USDT/RUB",
+        lines.append(_one_line(
+            "KenigSwap",
+            "USDT/RUB",
             [
-                ("Покупка", kenig_buy, "₽"),
-                ("Продажа", kenig_sell, "₽"),
+                _field("Покупка:", kenig_buy, "₽"),
+                _field("Продажа:", kenig_sell, "₽"),
             ],
-        )
+        ))
     else:
-        lines += ["KenigSwap rate USDT/RUB", "— нет данных —"]
+        lines.append(_one_line(
+            "KenigSwap",
+            "USDT/RUB",
+            [
+                _field("Покупка:", None, "₽"),
+                _field("Продажа:", None, "₽"),
+            ],
+        ))
 
-    lines.append("")
-
-    # EnergoTransBank (Покупка -> Продажа -> ЦБ)
+    # EnergoTransBank USD/RUB (Покупка -> Продажа -> ЦБ)
     if en_sell is not None and en_buy is not None and en_cbr is not None:
-        lines += _fmt_rate_block(
-            "EnergoTransBank rate USD/RUB",
+        lines.append(_one_line(
+            "EnergoTransBank",
+            "USD/RUB",
             [
-                ("Покупка", en_buy,  "₽"),
-                ("Продажа", en_sell, "₽"),
-                ("ЦБ",      en_cbr,  "₽"),
+                _field("Покупка:", en_buy,  "₽"),
+                _field("Продажа:", en_sell, "₽"),
+                _field("ЦБ:",      en_cbr,  "₽"),
             ],
-        )
+        ))
     else:
-        lines += ["EnergoTransBank rate USD/RUB", "— нет данных —"]
+        lines.append(_one_line(
+            "EnergoTransBank",
+            "USD/RUB",
+            [
+                _field("Покупка:", None, "₽"),
+                _field("Продажа:", None, "₽"),
+                _field("ЦБ:",      None, "₽"),
+            ],
+        ))
 
-    # (опционально) показать статус Rapira
     if SHOW_RAPIRA_META:
         lines += ["", f"Rapira status: {_last_rapira_status}"]
 
@@ -316,6 +329,9 @@ def main() -> None:
     install_chromium()
 
     global APP
+    if not TOKEN:
+        raise RuntimeError("TG_BOT_TOKEN is not set")
+
     APP = ApplicationBuilder().token(TOKEN).build()
 
     APP.add_handler(CommandHandler("start", cmd_start))
