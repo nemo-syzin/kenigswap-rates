@@ -1,10 +1,8 @@
-# ───────────────────── IMPORTS ──────────────────────
 import asyncio
 import html
 import logging
 import os
 import random
-import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -20,20 +18,25 @@ load_dotenv()
 TOKEN            = os.getenv("TG_BOT_TOKEN")
 PASSWORD         = os.getenv("TG_BOT_PASS")
 CHAT_ID          = os.getenv("TG_CHAT_ID", "@KaliningradCryptoRatesKenigSwap")
-
 KAL_TZ           = timezone(timedelta(hours=2))
 
-KENIG_ASK_OFFSET = 0.8   # на продажу (ask)
-KENIG_BID_OFFSET = -0.9  # на покупку (bid)
+# Оффсеты — только для fallback'ов (CoinGecko / прямой Rapira).
+# Основные оффсеты живут в supabase-worker.
+KENIG_ASK_OFFSET = float(os.getenv("KENIG_ASK_OFFSET", "0.8"))
+KENIG_BID_OFFSET = float(os.getenv("KENIG_BID_OFFSET", "-0.9"))
+COINGECKO_FALLBACK_OFFSET = float(os.getenv("COINGECKO_FALLBACK_OFFSET", "0.5"))
 
 MAX_RETRIES      = 3
 RETRY_DELAY      = 5
 AUTHORIZED_USERS: set[int] = set()
-
 RAPIRA_PROXY     = os.getenv("RAPIRA_PROXY")
 SHOW_RAPIRA_META = False
+APP = None
 
-APP = None  # будет установлен в main()
+# Supabase
+SUPABASE_URL       = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_KEY       = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
+USE_DB_AS_PRIMARY  = (os.getenv("USE_DB_AS_PRIMARY", "1") or "").lower() in ("1", "true", "yes")
 
 # ───────────────────── LOGGER ───────────────────────
 logging.basicConfig(
@@ -43,21 +46,89 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ────────────────── PLAYWRIGHT CHROMIUM ─────────────
-def install_chromium() -> None:
-    try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception as exc:
-        log.warning("Playwright install error (ignored): %s", exc)
+# ───────────────── SUPABASE READER ─────────────────
+def _sb_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+    }
 
-# ───────────────────── SCRAPERS ─────────────────────
-# ====== RAPIRA PARSER ========================================
+async def fetch_kenig_from_db() -> Optional[Tuple[float, float, str]]:
+    """
+    Читаем готовые kenig_sell/kenig_buy USDT/RUB из Supabase.
+    Возвращает (kenig_sell, kenig_buy, updated_at) или None.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    url = f"{SUPABASE_URL}/rest/v1/kenig_rates"
+    params = {
+        "select": "sell,buy,updated_at,is_active",
+        "source": "eq.kenig",
+        "base":   "eq.USDT",
+        "quote":  "eq.RUB",
+        "limit":  "1",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            r = await cli.get(url, params=params, headers=_sb_headers())
+            r.raise_for_status()
+            rows = r.json() or []
+            if not rows:
+                return None
+            row = rows[0]
+            if not row.get("is_active", True):
+                return None
+            sell = float(row["sell"]) if row.get("sell") is not None else None
+            buy  = float(row["buy"])  if row.get("buy")  is not None else None
+            ts   = str(row.get("updated_at") or "")
+            if sell is None or buy is None or sell <= 0 or buy <= 0:
+                return None
+            return sell, buy, ts
+    except Exception as e:
+        log.warning("Supabase fetch_kenig_from_db failed: %s", e)
+        return None
+
+async def fetch_energo_from_db() -> Optional[Tuple[float, float, float, str]]:
+    """
+    Читаем USD/RUB из Supabase (source=energo).
+    Возвращает (sell, buy, last_price_as_cbr, updated_at) или None.
+    last_price используется как заменитель ЦБ.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    url = f"{SUPABASE_URL}/rest/v1/kenig_rates"
+    params = {
+        "select": "sell,buy,last_price,updated_at,is_active",
+        "source": "eq.energo",
+        "base":   "eq.USD",
+        "quote":  "eq.RUB",
+        "limit":  "1",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            r = await cli.get(url, params=params, headers=_sb_headers())
+            r.raise_for_status()
+            rows = r.json() or []
+            if not rows:
+                return None
+            row = rows[0]
+            if not row.get("is_active", True):
+                return None
+            sell  = float(row["sell"])       if row.get("sell")       is not None else None
+            buy   = float(row["buy"])        if row.get("buy")        is not None else None
+            cbr   = float(row["last_price"]) if row.get("last_price") is not None else None
+            ts    = str(row.get("updated_at") or "")
+            if sell is None or buy is None or sell <= 0 or buy <= 0:
+                return None
+            return sell, buy, (cbr or (sell + buy) / 2), ts
+    except Exception as e:
+        log.warning("Supabase fetch_energo_from_db failed: %s", e)
+        return None
+
+# ──────────────── RAPIRA FALLBACK ────────────────────
 RAPIRA_RATES_URL = "https://api.rapira.net/open/market/rates"
 RAPIRA_OB_URL    = "https://api.rapira.net/market/exchange-plate-mini?symbol=USDT/RUB"
-
-_last_rapira_usdtrub: Tuple[Optional[float], Optional[float]] = (None, None)
-_last_rapira_ts: Optional[datetime] = None
-_last_rapira_status: str = ""
 
 class RapiraBlockedError(Exception):
     pass
@@ -67,17 +138,16 @@ def _backoff(attempt: int, base: float = 1.6, jitter: float = 0.6) -> float:
 
 async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    proxies = None
+    transport = None
     if RAPIRA_PROXY:
-        proxies = {"http://": RAPIRA_PROXY, "https://": RAPIRA_PROXY}
-
+        transport = httpx.AsyncHTTPTransport(proxy=RAPIRA_PROXY)
     for att in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(
                 headers=headers,
                 timeout=timeout,
                 follow_redirects=True,
-                proxies=proxies
+                transport=transport,
             ) as cli:
                 r = await cli.get(url)
                 if r.status_code == 451:
@@ -109,11 +179,6 @@ def _safe_float(v) -> Optional[float]:
         return None
 
 async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]:
-    """
-    Возвращает (best_ask, best_bid)
-    """
-    global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status
-
     try:
         data = await _rapira_get_json(RAPIRA_OB_URL)
         if data:
@@ -123,18 +188,12 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
             best_ask = _first_number_from_level(asks[0]) if asks else None
             best_bid = _first_number_from_level(bids[0]) if bids else None
             if best_ask is not None or best_bid is not None:
-                _last_rapira_usdtrub = (best_ask, best_bid)
-                _last_rapira_ts = datetime.now(KAL_TZ)
-                _last_rapira_status = "ok"
                 return best_ask, best_bid
-
         rates = await _rapira_get_json(RAPIRA_RATES_URL)
         items = (
             (rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items"))
-            if isinstance(rates, dict)
-            else rates
+            if isinstance(rates, dict) else rates
         )
-
         if isinstance(items, list):
             target = next(
                 (x for x in items
@@ -143,53 +202,110 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
                 None
             )
             if target:
-                ask = _safe_float(target.get("ask") or target.get("offer")
-                                  or target.get("askPrice") or target.get("sell"))
-                bid = _safe_float(target.get("bid") or target.get("bidPrice")
-                                  or target.get("buy"))
-                _last_rapira_usdtrub = (ask, bid)
-                _last_rapira_ts = datetime.now(KAL_TZ)
-                _last_rapira_status = "fallback"
+                ask = _safe_float(target.get("ask") or target.get("offer") or target.get("askPrice") or target.get("sell"))
+                bid = _safe_float(target.get("bid") or target.get("bidPrice") or target.get("buy"))
                 return ask, bid
-
-        _last_rapira_status = "error"
         return (None, None)
-
     except RapiraBlockedError:
-        _last_rapira_status = "blocked"
         return (None, None)
 
-# ============= ENERGOTRANSBANK ==================
-async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    На странице обычно: Покупка, Продажа, ЦБ.
-    Возвращаем (sell, buy, cbr) — как у вас было.
-    """
-    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
+# ──────────────── COINGECKO FALLBACK ────────────────
+async def fetch_coingecko_usdtrub() -> Optional[float]:
+    """USDT/RUB mid-price с CoinGecko. Без прокси, доступно отовсюду."""
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {"ids": "tether", "vs_currencies": "rub"}
+    for att in range(1, MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cli:
+                r = await cli.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                data = r.json()
+                price = (data.get("tether") or {}).get("rub")
+                if price and price > 0:
+                    return float(price)
+        except Exception as e:
+            log.warning("CoinGecko attempt %s failed: %s", att, e)
+            if att < MAX_RETRIES:
+                await asyncio.sleep(_backoff(att))
+    return None
 
+# ────────── ENERGO direct fallback ──────────
+async def fetch_energo() -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    url = "https://ru.myfin.by/bank/energotransbank/currency/kaliningrad"
     for att in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, timeout=15) as cli:
                 r = await cli.get(url)
                 r.raise_for_status()
-
                 soup = BeautifulSoup(r.text, "html.parser")
                 row = soup.select_one("table.table-best.white_bg tr:has(td.title)")
                 if not row:
                     raise RuntimeError("row not found")
-
                 buy, sell, cbr = [
                     float(td.text.replace(",", "."))
                     for td in row.find_all("td")[1:4]
                 ]
                 return sell, buy, cbr
-
         except Exception as e:
-            log.warning("Energo attempt %s/%s: %s", att, MAX_RETRIES, e)
+            log.warning("Energo direct attempt %s/%s: %s", att, MAX_RETRIES, e)
             if att < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
-
     return None, None, None
+
+# ──────────────── UNIFIED FETCHERS ─────────────────
+async def get_kenig_usdt_rub() -> Tuple[Optional[float], Optional[float], str]:
+    """
+    Возвращает (kenig_sell, kenig_buy, источник).
+    Источник: 'db' / 'rapira' / 'coingecko' / 'none'.
+    """
+    # 1. Из БД (если включено)
+    if USE_DB_AS_PRIMARY:
+        db = await fetch_kenig_from_db()
+        if db:
+            sell, buy, _ts = db
+            log.info("USDT/RUB from DB: sell=%.4f buy=%.4f", sell, buy)
+            return sell, buy, "db"
+
+    # 2. Rapira напрямую
+    ask, bid = await fetch_rapira_usdtrub_best()
+    if ask is not None and bid is not None:
+        sell = ask + KENIG_ASK_OFFSET
+        buy  = bid + KENIG_BID_OFFSET
+        log.info("USDT/RUB from Rapira direct: sell=%.4f buy=%.4f", sell, buy)
+        return sell, buy, "rapira"
+
+    # 3. CoinGecko mid + симметричный спред
+    mid = await fetch_coingecko_usdtrub()
+    if mid is not None:
+        sell = mid + COINGECKO_FALLBACK_OFFSET
+        buy  = mid - COINGECKO_FALLBACK_OFFSET
+        log.info("USDT/RUB from CoinGecko mid=%.4f → sell=%.4f buy=%.4f",
+                 mid, sell, buy)
+        return sell, buy, "coingecko"
+
+    log.error("USDT/RUB: все источники недоступны")
+    return None, None, "none"
+
+async def get_energo_usd_rub() -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+    """
+    Возвращает (sell, buy, cbr, источник).
+    Источник: 'db' / 'direct' / 'none'.
+    """
+    # 1. Из БД
+    if USE_DB_AS_PRIMARY:
+        db = await fetch_energo_from_db()
+        if db:
+            sell, buy, cbr, _ts = db
+            log.info("USD/RUB from DB: sell=%.2f buy=%.2f cbr=%.2f", sell, buy, cbr)
+            return sell, buy, cbr, "db"
+
+    # 2. Прямой парсер myfin.by
+    sell, buy, cbr = await fetch_energo()
+    if sell is not None and buy is not None:
+        log.info("USD/RUB from myfin.by direct: sell=%.2f buy=%.2f", sell, buy)
+        return sell, buy, cbr, "direct"
+
+    return None, None, None, "none"
 
 # ────────────── TELEGRAM COMMANDS ───────────────────
 def auth_ok(uid: int) -> bool:
@@ -208,7 +324,11 @@ async def cmd_start(u, _):
     await u.message.reply_text("Бот активен. /help")
 
 async def cmd_help(u, _):
-    await u.message.reply_text("/start /auth /check /change /show_offsets /help")
+    await u.message.reply_text(
+        "/start /auth /check /change /show_offsets /help\n\n"
+        "Примечание: /change в этом боте меняет только локальные fallback-оффсеты. "
+        "Реальные оффсеты для сайта и Exnode живут в supabase-worker."
+    )
 
 async def cmd_check(u, _):
     if not auth_ok(u.effective_user.id):
@@ -222,19 +342,25 @@ async def cmd_change(u, ctx):
     try:
         global KENIG_ASK_OFFSET, KENIG_BID_OFFSET
         KENIG_ASK_OFFSET, KENIG_BID_OFFSET = map(float, ctx.args[:2])
-        await u.message.reply_text(f"Новые оффсеты: ask +{KENIG_ASK_OFFSET}  bid {KENIG_BID_OFFSET}")
+        await u.message.reply_text(
+            f"Локальные fallback-оффсеты: ask +{KENIG_ASK_OFFSET}  bid {KENIG_BID_OFFSET}\n"
+            f"⚠️ Применяются только если БД недоступна. "
+            f"Для production-курсов меняйте в supabase-worker."
+        )
     except Exception:
         await u.message.reply_text("Пример: /change 1.0 -0.5")
 
 async def cmd_show(u, _):
     if not auth_ok(u.effective_user.id):
         return await u.message.reply_text("Нет доступа.")
-    await u.message.reply_text(f"Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}")
+    await u.message.reply_text(
+        f"Локальные fallback: Ask +{KENIG_ASK_OFFSET}  Bid {KENIG_BID_OFFSET}\n"
+        f"USE_DB_AS_PRIMARY: {USE_DB_AS_PRIMARY}"
+    )
 
-# ────────────── INLINE (LIKE BEFORE) BUT ALIGNED ──────────────
-# Формат: как на вашем скрине (заголовок + одна строка), но с нормальным выравниванием.
-NUM_W = 6   # ширина числа (80.72 -> 5, но берём запас)
-SEG_W = 20  # ширина "сегмента" (Покупка/Продажа/ЦБ) чтобы ровно было
+# ────────────── FORMATTING ──────────────
+NUM_W = 6
+SEG_W = 20
 
 def _seg(lbl: str, val: Optional[float], unit: str = "₽", comma: bool = True) -> str:
     n = "—" if val is None else f"{val:.2f}"
@@ -244,33 +370,30 @@ def _seg(lbl: str, val: Optional[float], unit: str = "₽", comma: bool = True) 
     return s.ljust(SEG_W)
 
 def _inline_line(segments: List[str]) -> str:
-    # Склеиваем и убираем хвостовые пробелы
     return "".join(segments).rstrip()
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
-    gr_ask, gr_bid = await fetch_rapira_usdtrub_best()
-    en_sell, en_buy, en_cbr = await fetch_energo()
+    kenig_sell, kenig_buy, kenig_src = await get_kenig_usdt_rub()
+    en_sell, en_buy, en_cbr, en_src  = await get_energo_usd_rub()
 
     ts = datetime.now(KAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines: List[str] = [ts, ""]
 
     # KenigSwap
     lines.append("KenigSwap rate USDT/RUB")
-    if gr_ask is not None and gr_bid is not None:
-        kenig_sell = gr_ask + KENIG_ASK_OFFSET  # продажа
-        kenig_buy  = gr_bid + KENIG_BID_OFFSET  # покупка
+    if kenig_sell is not None and kenig_buy is not None:
         lines.append(_inline_line([
             _seg("Покупка", kenig_buy,  "₽", comma=True),
             _seg("Продажа", kenig_sell, "₽", comma=False),
         ]))
     else:
         lines.append("— нет данных —")
-
     lines.append("")
+
     # EnergoTransBank
     lines.append("EnergoTransBank rate USD/RUB")
-    if en_sell is not None and en_buy is not None and en_cbr is not None:
+    if en_sell is not None and en_buy is not None:
         lines.append(_inline_line([
             _seg("Покупка", en_buy,  "₽", comma=True),
             _seg("Продажа", en_sell, "₽", comma=True),
@@ -280,10 +403,9 @@ async def send_rates_message(app):
         lines.append("— нет данных —")
 
     if SHOW_RAPIRA_META:
-        lines += ["", f"Rapira status: {_last_rapira_status}"]
+        lines += ["", f"Источники: kenig={kenig_src}, energo={en_src}"]
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
-
     try:
         await app.bot.send_message(
             chat_id=CHAT_ID,
@@ -296,12 +418,9 @@ async def send_rates_message(app):
 
 # ───────────────────── MAIN ─────────────────────────
 def main() -> None:
-    install_chromium()
-
     global APP
     if not TOKEN:
         raise RuntimeError("TG_BOT_TOKEN is not set")
-
     APP = ApplicationBuilder().token(TOKEN).build()
     APP.add_handler(CommandHandler("start", cmd_start))
     APP.add_handler(CommandHandler("help", cmd_help))
@@ -309,14 +428,14 @@ def main() -> None:
     APP.add_handler(CommandHandler("check", cmd_check))
     APP.add_handler(CommandHandler("change", cmd_change))
     APP.add_handler(CommandHandler("show_offsets", cmd_show))
-
     sched = AsyncIOScheduler(timezone=KAL_TZ)
     sched.add_job(send_rates_message, "interval", minutes=2, seconds=30, args=[APP])
     sched.start()
-
-    log.info("Bot started.")
+    log.info(
+        "Bot started. USE_DB_AS_PRIMARY=%s, Supabase=%s",
+        USE_DB_AS_PRIMARY, bool(SUPABASE_URL and SUPABASE_KEY),
+    )
     APP.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
