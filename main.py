@@ -112,7 +112,13 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
     try:
         data = await _rapira_get_json(RAPIRA_OB_URL)
         if data:
-            container = data.get("data", data)
+            # ВАЖНО: Rapira умеет отвечать {"data": null, "code": 500} —
+            # тогда data.get("data", data) вернёт None (ключ есть, значение null),
+            # и обращение к нему падало с AttributeError ДО фолбэка ниже.
+            # Из-за этого публикация курса в канал молча вставала.
+            container = data.get("data")
+            if not isinstance(container, dict):
+                container = data
             asks = container.get("asks")
             bids = container.get("bids")
             best_ask = _first_number_from_level(asks[0]) if asks else None
@@ -150,6 +156,12 @@ async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]
         return (None, None)
     except RapiraBlockedError:
         _last_rapira_status = "blocked"
+        return (None, None)
+    except Exception as e:
+        # Любой сюрприз от Rapira (смена формата, битый JSON) не должен
+        # выбрасывать исключение наверх и срывать публикацию в канал.
+        log.exception("Rapira parse failed: %s", e)
+        _last_rapira_status = "error"
         return (None, None)
 
 # ============= ENERGOTRANSBANK ==================
@@ -237,8 +249,19 @@ def _inline_line(segments: List[str]) -> str:
 
 # ────────────── MESSAGE SENDER ──────────────────────
 async def send_rates_message(app):
-    gr_ask, gr_bid = await fetch_rapira_usdtrub_best()
-    en_sell, en_buy, en_cbr = await fetch_energo()
+    # Источники опрашиваем изолированно: падение одного не должно
+    # отменять публикацию — лучше выйти с «— нет данных —» по одной
+    # строке, чем оставить канал вообще без сообщений.
+    try:
+        gr_ask, gr_bid = await fetch_rapira_usdtrub_best()
+    except Exception as e:
+        log.exception("Rapira source failed: %s", e)
+        gr_ask, gr_bid = None, None
+    try:
+        en_sell, en_buy, en_cbr = await fetch_energo()
+    except Exception as e:
+        log.exception("Energo source failed: %s", e)
+        en_sell, en_buy, en_cbr = None, None, None
 
     ts = datetime.now(KAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
     lines: List[str] = [ts, ""]
