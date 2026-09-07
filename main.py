@@ -52,41 +52,51 @@ def install_chromium() -> None:
 RAPIRA_RATES_URL = "https://api.rapira.net/open/market/rates"
 RAPIRA_OB_URL    = "https://api.rapira.net/market/exchange-plate-mini?symbol=USDT/RUB"
 
+RAPIRA_CANDLES_URL = "https://api.rapira.net/market/history"
+
 _last_rapira_usdtrub: Tuple[Optional[float], Optional[float]] = (None, None)
 _last_rapira_ts: Optional[datetime] = None
 _last_rapira_status: str = ""
-
-class RapiraBlockedError(Exception):
-    pass
+_last_rapira_diag: str = ""  # «маршрут:статус» последнего прогона (ob:403 rates:ok …)
 
 def _backoff(attempt: int, base: float = 1.6, jitter: float = 0.6) -> float:
     return (base ** (attempt - 1)) + random.uniform(0, jitter)
 
-async def _rapira_get_json(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+async def _rapira_get_json(
+    url: str,
+    timeout: float = 15.0,
+    proxy: Optional[str] = None,
+    attempts: int = MAX_RETRIES,
+) -> Tuple[Optional[Any], str]:
+    """GET с ретраями → (json | None, короткий статус для диагностики).
+
+    4xx НЕ ретраим: 403/451 — детерминированная блокировка (гео или бан IP),
+    повтор лишь множит частоту запросов через прокси и приближает бан.
+    """
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    proxies = None
-    if RAPIRA_PROXY:
-        proxies = {"http://": RAPIRA_PROXY, "https://": RAPIRA_PROXY}
-    for att in range(1, MAX_RETRIES + 1):
+    status = "?"
+    for att in range(1, attempts + 1):
         try:
+            # proxy= (а не proxies=) — есть и в пиненном httpx 0.26, и в новых
             async with httpx.AsyncClient(
                 headers=headers,
                 timeout=timeout,
                 follow_redirects=True,
-                proxies=proxies
+                proxy=proxy
             ) as cli:
                 r = await cli.get(url)
-                if r.status_code == 451:
-                    raise RapiraBlockedError("HTTP 451 (blocked)")
                 r.raise_for_status()
-                return r.json()
-        except RapiraBlockedError:
-            raise
+                return r.json(), "ok"
+        except httpx.HTTPStatusError as e:
+            status = str(e.response.status_code)
+            if e.response.status_code < 500:
+                break
         except Exception as e:
-            log.warning("Rapira GET %s attempt %s failed: %s", url, att, e)
-            if att < MAX_RETRIES:
-                await asyncio.sleep(_backoff(att))
-    return None
+            status = type(e).__name__
+        if att < attempts:
+            await asyncio.sleep(_backoff(att))
+    log.warning("Rapira GET %s failed: %s", url, status)
+    return None, status
 
 def _first_number_from_level(level) -> Optional[float]:
     try:
@@ -104,58 +114,109 @@ def _safe_float(v) -> Optional[float]:
     except Exception:
         return None
 
+def _parse_rapira_rates(rates: Any) -> Tuple[Optional[float], Optional[float]]:
+    items = (
+        (rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items"))
+        if isinstance(rates, dict)
+        else rates
+    )
+    if not isinstance(items, list):
+        return None, None
+    target = next(
+        (x for x in items
+         if isinstance(x, dict)
+         and (x.get("symbol") or x.get("pair") or x.get("name") or "")
+            .upper().replace("_", "/") == "USDT/RUB"),
+        None
+    )
+    if not target:
+        return None, None
+    ask = _safe_float(target.get("ask") or target.get("offer")
+                      or target.get("askPrice") or target.get("sell"))
+    bid = _safe_float(target.get("bid") or target.get("bidPrice")
+                      or target.get("buy"))
+    return ask, bid
+
 async def fetch_rapira_usdtrub_best() -> Tuple[Optional[float], Optional[float]]:
     """
-    Возвращает (best_ask, best_bid)
+    Возвращает (best_ask, best_bid).
+
+    Лестница маршрутов: стакан → rates (прокси) → rates (напрямую) → свечи.
+    07.09.2026 Rapira закрыла публичный стакан (exchange-plate-mini → 403
+    всем, любой UA), а маршрут через RAPIRA_PROXY перестал отдавать и rates —
+    канал 4 часа публиковал «— нет данных —». Одна пара «стакан + rates через
+    один прокси» не переживает частичные блокировки, поэтому каждый следующий
+    маршрут идёт другим путём. Диагностика маршрутов — в _last_rapira_diag.
     """
-    global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status
+    global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status, _last_rapira_diag
+
+    def _remember(ask: float, bid: float, status: str, diag: List[str]) -> Tuple[float, float]:
+        global _last_rapira_usdtrub, _last_rapira_ts, _last_rapira_status, _last_rapira_diag
+        _last_rapira_usdtrub = (ask, bid)
+        _last_rapira_ts = datetime.now(KAL_TZ)
+        _last_rapira_status = status
+        _last_rapira_diag = " ".join(diag)
+        return ask, bid
+
     try:
-        data = await _rapira_get_json(RAPIRA_OB_URL)
-        if data:
-            # ВАЖНО: Rapira умеет отвечать {"data": null, "code": 500} —
-            # тогда data.get("data", data) вернёт None (ключ есть, значение null),
-            # и обращение к нему падало с AttributeError ДО фолбэка ниже.
-            # Из-за этого публикация курса в канал молча вставала.
+        diag: List[str] = []
+
+        # 1. Стакан через прокси. После закрытия — дешёвая проба «не открыли
+        # ли обратно»: 1 попытка, без ретраев. ВАЖНО: Rapira умеет отвечать
+        # {"data": null, "code": 500} — тогда .get("data") даёт None и
+        # обращение к нему падало с AttributeError ДО фолбэка. Проверяем типы.
+        data, st = await _rapira_get_json(RAPIRA_OB_URL, proxy=RAPIRA_PROXY, attempts=1)
+        diag.append(f"ob:{st}")
+        if isinstance(data, dict):
             container = data.get("data")
             if not isinstance(container, dict):
                 container = data
             asks = container.get("asks")
             bids = container.get("bids")
-            best_ask = _first_number_from_level(asks[0]) if asks else None
-            best_bid = _first_number_from_level(bids[0]) if bids else None
-            if best_ask is not None or best_bid is not None:
-                _last_rapira_usdtrub = (best_ask, best_bid)
-                _last_rapira_ts = datetime.now(KAL_TZ)
-                _last_rapira_status = "ok"
-                return best_ask, best_bid
+            best_ask = _first_number_from_level(asks[0]) if isinstance(asks, list) and asks else None
+            best_bid = _first_number_from_level(bids[0]) if isinstance(bids, list) and bids else None
+            # Каналу нужны обе стороны — с одной идём к следующему маршруту.
+            if best_ask is not None and best_bid is not None:
+                return _remember(best_ask, best_bid, "ok", diag)
 
-        rates = await _rapira_get_json(RAPIRA_RATES_URL)
-        items = (
-            (rates.get("data") or rates.get("rates") or rates.get("result") or rates.get("items"))
-            if isinstance(rates, dict)
-            else rates
+        # 2–3. rates: через прокси, затем напрямую. Если забанен IP прокси —
+        # прямой запрос с IP хостинга может проходить, и наоборот.
+        rates_routes = [("rates", RAPIRA_PROXY)]
+        if RAPIRA_PROXY:
+            rates_routes.append(("rates-direct", None))
+        for name, proxy in rates_routes:
+            rates, st = await _rapira_get_json(RAPIRA_RATES_URL, proxy=proxy, attempts=2)
+            ask, bid = _parse_rapira_rates(rates)
+            diag.append(f"{name}:{'parse' if st == 'ok' and (ask is None or bid is None) else st}")
+            if ask is not None and bid is not None:
+                log.info("Rapira %s: ask=%s bid=%s", name, ask, bid)
+                return _remember(ask, bid, name, diag)
+
+        # 4. Минутные свечи: close последней — цена последней сделки, ask=bid.
+        # Грубее пары ask/bid (спред Rapira ~0.01 ₽ — на порядок меньше наших
+        # оффсетов ±0.8/0.9), но живой курс лучше «— нет данных —» в канале.
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        candles_url = (
+            f"{RAPIRA_CANDLES_URL}?symbol=USDT/RUB&resolution=1"
+            f"&from={now_ms - 30 * 60 * 1000}&to={now_ms}&barsMaxSize=50"
         )
-        if isinstance(items, list):
-            target = next(
-                (x for x in items
-                 if (x.get("symbol") or x.get("pair") or x.get("name") or "")
-                    .upper().replace("_", "/") == "USDT/RUB"),
-                None
-            )
-            if target:
-                ask = _safe_float(target.get("ask") or target.get("offer")
-                                  or target.get("askPrice") or target.get("sell"))
-                bid = _safe_float(target.get("bid") or target.get("bidPrice")
-                                  or target.get("buy"))
-                _last_rapira_usdtrub = (ask, bid)
-                _last_rapira_ts = datetime.now(KAL_TZ)
-                _last_rapira_status = "fallback"
-                return ask, bid
+        candle_routes = [("candles", RAPIRA_PROXY)]
+        if RAPIRA_PROXY:
+            candle_routes.append(("candles-direct", None))
+        for name, proxy in candle_routes:
+            bars, st = await _rapira_get_json(candles_url, proxy=proxy, attempts=1)
+            diag.append(f"{name}:{st}")
+            if isinstance(bars, list) and bars:
+                last = bars[-1]
+                if isinstance(last, list) and len(last) >= 5:
+                    close = _safe_float(last[4])
+                    if close is not None and close > 0:
+                        log.warning("Rapira candles fallback: close=%s (ask=bid)", close)
+                        return _remember(close, close, name, diag)
 
         _last_rapira_status = "error"
-        return (None, None)
-    except RapiraBlockedError:
-        _last_rapira_status = "blocked"
+        _last_rapira_diag = " ".join(diag)
+        log.error("Rapira: все маршруты отказали: %s", _last_rapira_diag)
         return (None, None)
     except Exception as e:
         # Любой сюрприз от Rapira (смена формата, битый JSON) не должен
@@ -291,7 +352,7 @@ async def send_rates_message(app):
         lines.append("— нет данных —")
 
     if SHOW_RAPIRA_META:
-        lines += ["", f"Rapira status: {_last_rapira_status}"]
+        lines += ["", f"Rapira status: {_last_rapira_status} [{_last_rapira_diag}]"]
 
     msg = "<pre>" + html.escape("\n".join(lines)) + "</pre>"
     try:
