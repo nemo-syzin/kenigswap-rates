@@ -40,6 +40,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# httpx/httpcore на уровне INFO печатают полный адрес каждого запроса, а у
+# Telegram Bot API токен стоит прямо в пути (/bot<токен>/sendMessage) — токен
+# бота оказывался в журналах Render открытым текстом (ASVS V16.2.5). Журнал
+# каждого запроса не нужен: сбои сети код логирует сам, на WARNING.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # ────────────────── PLAYWRIGHT CHROMIUM ─────────────
 def install_chromium() -> None:
     try:
